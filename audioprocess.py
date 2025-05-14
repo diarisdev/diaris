@@ -30,6 +30,7 @@ vad.set_mode(3)  # Aggressiveness mode: 0, 1, 2, or 3 (higher is more aggressive
 silero_model = torch.hub.load('snakers4/silero-vad', 'silero_vad', trust_repo=True)
 
 
+
 # Save to WAV file
 def save():
     with wave.open(OUTPUT_FILENAME, 'wb') as waveFile:
