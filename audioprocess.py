@@ -3,120 +3,135 @@ import pyaudio
 import keyboard
 import time
 import numpy as np
-import silero_vad.utils_vad
-import webrtcvad
 import torch
-import silero_vad
+import webrtcvad
 
-#  Audio Recording Constants
-FORMAT = pyaudio.paInt16  # 16-bit PCM
-CHANNELS = 1  # Mono (set to 2 if stereo is needed)
-RATE = 48000  # Sample rate
-FRAME_DURATION_MS = 20 # Duration of each frame
-FRAME_SIZE = int(RATE * FRAME_DURATION_MS / 1000) # Number of frames per buffer
-OUTPUT_FILENAME = "output.wav"  # Output file
+# Audio Recording Constants
+FORMAT = pyaudio.paInt16
+CHANNELS = 2  # System audio is almost always Stereo (2 channels)
+RATE = 48000
+FRAME_DURATION_MS = 30 
+FRAME_SIZE = int(RATE * FRAME_DURATION_MS / 1000)
+OUTPUT_FILENAME = "system_recorded.wav"
 
-#  Select the correct input device
-input_device_index = 0
+def find_system_audio_device(p):
+    """
+    Automatically finds the Windows WASAPI Loopback device or Stereo Mix.
+    """
+    print("🔍 Searching for system audio device...")
+    
+    # 1. Try to find the Windows WASAPI Host API index
+    wasapi_info = None
+    for i in range(p.get_host_api_count()):
+        host_info = p.get_host_api_info_by_index(i)
+        if "WASAPI" in host_info["name"]:
+            wasapi_info = host_info
+            break
 
-#  Initialize PyAudio
+    if wasapi_info:
+        # Search for Loopback devices within WASAPI
+        for i in range(p.get_device_count()):
+            dev = p.get_device_info_by_index(i)
+            # Look for devices with "Loopback" and that belong to WASAPI
+            if dev["hostApi"] == wasapi_info["index"] and "Loopback" in dev["name"]:
+                print(f"✅ Found WASAPI Loopback: {dev['name']} (Index: {i})")
+                return i
+
+    # 2. Fallback: Search for "Stereo Mix" or "What U Hear" in any API
+    for i in range(p.get_device_count()):
+        dev = p.get_device_info_by_index(i)
+        name = dev["name"].lower()
+        if "stereo mix" in name or "what u hear" in name:
+            print(f"✅ Found Fallback: {dev['name']} (Index: {i})")
+            return i
+
+    print("❌ Could not find a system audio device automatically.")
+    return None
+
+# Initialize PyAudio
 audio = pyaudio.PyAudio()
 
-#  Initialize WebRTC VAD
-vad = webrtcvad.Vad()
-vad.set_mode(3)  # Aggressiveness mode: 0, 1, 2, or 3 (higher is more aggressive)
-
-# Load Silero VAD
-silero_model = torch.hub.load('snakers4/silero-vad', 'silero_vad', trust_repo=True)
-
-
-
-# Save to WAV file
-def save():
-    with wave.open(OUTPUT_FILENAME, 'wb') as waveFile:
-        waveFile.setnchannels(CHANNELS)
-        waveFile.setsampwidth(audio.get_sample_size(FORMAT))
-        waveFile.setframerate(RATE)
-        waveFile.writeframes(b''.join(frames))
-    print(f"✅ Audio saved as {OUTPUT_FILENAME}")
-
-#  Display audio devices
-print("\nAvailable Audio Devices:")
-for i in range(audio.get_device_count()):
-    dev = audio.get_device_info_by_index(i)
-    print(f"{i}: {dev['name']} | Channels: {dev['maxInputChannels']} | Rate: {int(dev['defaultSampleRate'])}")
-
+# Auto-detect device
+input_device_index = find_system_audio_device(audio)
 
 if input_device_index is None:
-    input_device_index = int(input("\nEnter the index of your input device: "))
+    print("Defaulting to standard input. Note: This might record your MIC, not SYSTEM audio.")
+    input_device_index = audio.get_default_input_device_info()['index']
 
-#  Open the audio stream
-stream = audio.open(format=FORMAT,
-                    channels=CHANNELS,
-                    rate=RATE,
-                    input=True,
-                    input_device_index=input_device_index,
-                    frames_per_buffer=FRAME_SIZE)
+# Initialize VAD
+vad = webrtcvad.Vad(3)
+silero_model = torch.hub.load('snakers4/silero-vad', 'silero_vad', trust_repo=True)
 
-frames = []
-
-# Detect voice activity using WebRTC VAD
 def detect_voice_activity(data):
-    is_speech_webrtc = vad.is_speech(data, RATE)
-    # If WebRTC VAD detects speech, use Silero VAD for more accurate results
-    if is_speech_webrtc:
-        # Convert the audio data to a tensor
-        audio_np = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
-        audio_tensor = torch.from_numpy(audio_np)
-        # Get the speech timestamps
-        with torch.no_grad():
-            is_speech_silero = silero_model(audio_tensor, RATE).item() > 0.5
-
-        return is_speech_silero  # Return True only if both VADs detect speech
+    """VAD requires mono, but we are recording stereo."""
+    audio_np = np.frombuffer(data, dtype=np.int16)
+    
+    # Convert stereo to mono for VAD processing
+    if CHANNELS == 2:
+        # Average the two channels to make mono
+        audio_np_mono = audio_np.reshape(-1, 2).mean(axis=1).astype(np.int16)
     else:
-        return False
+        audio_np_mono = audio_np
 
+    try:
+        # WebRTC VAD
+        is_speech_webrtc = vad.is_speech(audio_np_mono.tobytes(), RATE)
+        if is_speech_webrtc:
+            # Silero VAD
+            audio_tensor = torch.from_numpy(audio_np_mono.astype(np.float32) / 32768.0)
+            with torch.no_grad():
+                confidence = silero_model(audio_tensor, RATE).item()
+            return confidence > 0.4
+    except:
+        pass
+    return False
 
 def live_record():
+    frames = []
+    
     try:
-        print("🎤 Now Streaming... Press SPACE to stop.")
-        while True:
-            try:                
-                data = stream.read(FRAME_SIZE, exception_on_overflow=False)  # Prevent buffer errors
-                is_speech = detect_voice_activity(data)
-                if is_speech:
-                    frames.append(data)
-                else:
-                    frames.append(b'\x00' * len(data))
+        stream = audio.open(format=FORMAT,
+                            channels=CHANNELS,
+                            rate=RATE,
+                            input=True,
+                            input_device_index=input_device_index,
+                            frames_per_buffer=FRAME_SIZE)
 
-                # Calculate the volume level to display
-                audio_data = np.frombuffer(data, dtype=np.int16)
-                volume_level = np.linalg.norm(audio_data) / np.sqrt(len(audio_data))
+        print("\n🔴 Recording... Press SPACE to stop.")
+        
+        while not keyboard.is_pressed("space"):
+            data = stream.read(FRAME_SIZE, exception_on_overflow=False)
+            
+            # VAD check
+            is_speech = detect_voice_activity(data)
+            
+            if is_speech:
+                frames.append(data)
+            else:
+                # Add silence bytes to keep the timeline consistent
+                frames.append(b'\x00' * len(data))
 
-                # Display the volume level
-                print(f"Volume Level: {volume_level:.2f} | {'Speaking' if is_speech else 'Silence'} ", end='\r')
+            print(f"Status: {'[VOICE DETECTED]' if is_speech else '[SYSTEM SOUNDS]'}   ", end='\r')
 
-            except OSError as e:
-                print(f"⚠️ Buffer Overflow Error: {e}")  # If buffer overflow happens, warn the user
+        print("\n🛑 Recording finished.")
+        
+    except Exception as e:
+        print(f"\n⚠️ Error: {e}")
+        print("Tip: If you get 'Invalid number of channels', try setting CHANNELS = 1 at the top.")
+    
+    finally:
+        # Save file
+        if frames:
+            with wave.open(OUTPUT_FILENAME, 'wb') as wf:
+                wf.setnchannels(CHANNELS)
+                wf.setsampwidth(audio.get_sample_size(FORMAT))
+                wf.setframerate(RATE)
+                wf.writeframes(b''.join(frames))
+            print(f"💾 File saved as {OUTPUT_FILENAME}")
+        
+        stream.stop_stream()
+        stream.close()
+        audio.terminate()
 
-            if keyboard.is_pressed("space"):  # Stop when SPACE is pressed
-                print("🛑 Recording stopped.")
-                time.sleep(0.3)  # Prevent double presses
-                break
-    except KeyboardInterrupt:
-        print("🛑 Recording stopped.")
-
-    # Stop & close the stream 
-    stream.stop_stream()
-    stream.close()
-    audio.terminate()
-
-    save()
-
-
-live_record()
-
-
-
-
-
+if __name__ == "__main__":
+    live_record()
