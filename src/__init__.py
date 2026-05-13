@@ -1,11 +1,12 @@
 """
 src - Audio-process Modüler Paket
 
+Alt Paketler:
+    audio       : Ses donanım katmanı (cihaz algılama, VAD)
+    core        : AI motor katmanı (Whisper, Pyannote)
+
 Modüller:
     config      : Sabitler, ortam değişkenleri, GPU/model ayarları
-    device      : Ses cihazı bulma
-    vad         : WebRTC + Silero ikili katman ses algılama
-    ai_worker   : Whisper transkripsiyon + Pyannote konuşmacı ayrıştırma
     pipeline    : Canlı kayıt döngüsü ve orkestrasyon
 """
 

@@ -161,4 +161,14 @@ cython_debug/
 
 .wav
 
-Local_models
+# Yerel AI modelleri
+models/
+
+# Benchmark test data (LibriSpeech ~350MB)
+tests/data/
+
+# Benchmark sonuç dosyaları
+benchmark_*.csv
+
+# Çıktı ses dosyaları
+output/*.wav

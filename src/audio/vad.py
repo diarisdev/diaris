@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import webrtcvad
 
-from .config import VAD_AGGRESSIVENESS, SILERO_THRESHOLD
+from ..config import VAD_AGGRESSIVENESS, SILERO_THRESHOLD
 
 
 class VADEngine:

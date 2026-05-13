@@ -13,7 +13,7 @@ import soundfile as sf
 from faster_whisper import WhisperModel
 from pyannote.audio import Pipeline
 
-from .config import (
+from ..config import (
     DEVICE, COMPUTE_TYPE, HF_TOKEN,
     WHISPER_PATH, DIARIZATION_MODEL,
     DEFAULT_RATE, DEFAULT_CHANNELS, WHISPER_LANGUAGE,

@@ -12,9 +12,9 @@ import pyaudiowpatch as pyaudio
 import keyboard
 
 from .config import DEFAULT_RATE, DEFAULT_CHANNELS, FRAME_DURATION_MS, OUTPUT_FILENAME, SILENCE_LIMIT
-from .device import auto_detect_device
-from .vad import VADEngine
-from .ai_worker import AIWorker, format_results
+from .audio.device import auto_detect_device
+from .audio.vad import VADEngine
+from .core.ai_worker import AIWorker, format_results
 
 FORMAT = pyaudio.paInt16
 
