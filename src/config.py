@@ -26,7 +26,10 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 OUTPUT_FILENAME = os.path.join(OUTPUT_DIR, os.getenv("OUTPUT_FILENAME", "system_recorded.wav"))
 
 # --- Sessizlik Algılama ---
-SILENCE_LIMIT = int(os.getenv("SILENCE_LIMIT", "50"))
+SILENCE_LIMIT = int(os.getenv("SILENCE_LIMIT", "30"))
+SHORT_SILENCE_LIMIT = int(os.getenv("SHORT_SILENCE_LIMIT", "15"))
+SOFT_CHUNK_DURATION_MS = int(os.getenv("SOFT_CHUNK_DURATION_MS", "5000"))
+MAX_CHUNK_DURATION_MS = int(os.getenv("MAX_CHUNK_DURATION_MS", "10000"))
 VAD_AGGRESSIVENESS = int(os.getenv("VAD_AGGRESSIVENESS", "1"))
 SILERO_THRESHOLD = float(os.getenv("SILERO_THRESHOLD", "0.25"))
 

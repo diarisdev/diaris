@@ -171,4 +171,5 @@ tests/data/
 benchmark_*.csv
 
 # Çıktı ses dosyaları
+system_recorded.wav
 output/*.wav
