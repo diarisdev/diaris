@@ -2,6 +2,8 @@
 Canlı kayıt ve ana iş akışı modülü.
 Ses cihazından canlı okuma, VAD ile konuşma algılama,
 ve AI worker thread'e ses parçası gönderme mantığını içerir.
+
+Daha uzun chunk'lar kullanarak diarization kalitesini artırır.
 """
 
 import wave

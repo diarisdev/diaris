@@ -52,6 +52,7 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 LOCAL_MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 WHISPER_PATH = os.path.join(LOCAL_MODELS_DIR, "whisper-small")
 DIARIZATION_MODEL = os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
+DIARIZATION_CONFIG_PATH = os.path.join(LOCAL_MODELS_DIR, "diarization_config.yaml")
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -59,3 +60,8 @@ COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
 
 # --- Whisper Ayarları ---
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en")
+
+# --- Diarization Ayarları ---
+# Konuşmacı eşleştirme için cosine similarity eşiği (cross-chunk tutarlılık)
+DIARIZATION_EMBEDDING_THRESHOLD = float(os.getenv("DIARIZATION_EMBEDDING_THRESHOLD", "0.75"))
+
