@@ -146,16 +146,25 @@ class AIWorker:
                     pass
 
 
-def format_results(results):
+def format_results(results, return_str=False):
     """
-    AI sonuçlarını okunabilir formatta yazdırır.
+    AI sonuçlarını okunabilir formatta yazdırır veya döndürür.
 
     Args:
         results: process_chunk'tan dönen sonuç listesi
+        return_str: True ise sonucu metin olarak döndürür, False ise terminale basar.
     """
     if not results:
-        return
-    print("\n" + "-" * 50)
+        return "" if return_str else None
+
+    lines = ["-" * 50]
     for r in results:
-        print(f"[{r['speaker']}] {r['start']:.1f}s - {r['end']:.1f}s: {r['text']}")
-    print("-" * 50 + "\n")
+        lines.append(f"[{r['speaker']}] {r['start']:.1f}s - {r['end']:.1f}s: {r['text']}")
+    lines.append("-" * 50)
+    
+    out_str = "\n".join(lines)
+    
+    if return_str:
+        return out_str
+        
+    print("\n" + out_str + "\n")
