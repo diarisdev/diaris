@@ -17,6 +17,8 @@ warnings.filterwarnings("ignore", message=".*pkg_resources.*")
 warnings.filterwarnings("ignore", message=".*torchcodec.*")
 warnings.filterwarnings("ignore", category=UserWarning, module="pyannote")
 warnings.filterwarnings("ignore", message=".*std\\(\\).*degrees of freedom.*")
+warnings.filterwarnings("ignore", message=".*Mean of empty slice.*")
+warnings.filterwarnings("ignore", message=".*invalid value encountered in divide.*")
 
 import os
 import sys
