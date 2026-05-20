@@ -64,4 +64,5 @@ WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en")
 # --- Diarization Ayarları ---
 # Konuşmacı eşleştirme için cosine similarity eşiği (cross-chunk tutarlılık)
 DIARIZATION_EMBEDDING_THRESHOLD = float(os.getenv("DIARIZATION_EMBEDDING_THRESHOLD", "0.75"))
-
+# Warm-up süresi (ms) — bu süre boyunca embedding toplanır, sonra konuşmacılar belirlenir
+DIARIZATION_WARMUP_MS = int(os.getenv("DIARIZATION_WARMUP_MS", "45000"))
