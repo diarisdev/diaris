@@ -51,7 +51,7 @@ def run():
     3. VAD motorunu başlatır
     4. AI worker thread'i arka planda başlatır
     5. Canlı ses okur, VAD ile filtreler, konuşma bitince chunk'ı AI'a gönderir
-    6. SPACE tuşuyla durur, ses dosyasını kaydeder
+    6. CTRL+Q tuşlarıyla durur, ses dosyasını kaydeder
     """
     p = pyaudio.PyAudio()
 
@@ -96,10 +96,10 @@ def run():
 
         print("\n" + "=" * 40)
         print("🔴 CANLI DİNLENİYOR VE ÇEVRİLİYOR...")
-        print("Durdurmak için BOŞLUK (SPACE) tuşuna bas.")
+        print("Durdurmak için 'CTRL + Q' tuşlarına bas.")
         print("=" * 40 + "\n")
 
-        while not keyboard.is_pressed("space"):
+        while not keyboard.is_pressed("ctrl+q"):
             data = stream.read(frame_size, exception_on_overflow=False)
             is_speech, conf = vad_engine.check_speech(data, rate, channels)
 
