@@ -19,6 +19,13 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+try:
+    from pyannote.core import Annotation, Segment
+    from pyannote.metrics.diarization import DiarizationErrorRate
+    HAS_PYANNOTE_METRICS = True
+except ImportError:
+    HAS_PYANNOTE_METRICS = False
+
 
 @dataclass
 class EvalResult:
@@ -80,6 +87,48 @@ class BenchmarkReport:
         if not self.results:
             return None
         return max(self.results, key=lambda r: r.wer)
+
+
+@dataclass
+class DiarizationEvalResult:
+    """Tek bir örneğin diarization değerlendirme sonucu."""
+    meeting_id: str
+    der: float              # Diarization Error Rate
+    false_alarm: float      # False Alarm Rate
+    missed_detection: float # Missed Detection Rate
+    confusion: float        # Speaker Confusion Rate
+    duration: float         # Ses süresi
+
+
+@dataclass
+class DiarizationReport:
+    """Toplu diarization benchmark raporu."""
+    results: list = field(default_factory=list)
+    total_meetings: int = 0
+    
+    @property
+    def total_duration(self):
+        return sum(r.duration for r in self.results)
+
+    @property
+    def avg_der(self):
+        if not self.results: return 0.0
+        return sum(r.der for r in self.results) / len(self.results)
+
+    @property
+    def avg_false_alarm(self):
+        if not self.results: return 0.0
+        return sum(r.false_alarm for r in self.results) / len(self.results)
+
+    @property
+    def avg_missed_detection(self):
+        if not self.results: return 0.0
+        return sum(r.missed_detection for r in self.results) / len(self.results)
+
+    @property
+    def avg_confusion(self):
+        if not self.results: return 0.0
+        return sum(r.confusion for r in self.results) / len(self.results)
 
 
 class TranscriptionEvaluator:
@@ -321,3 +370,83 @@ class TranscriptionEvaluator:
 
         _, subs, ins, dels = dp[n][m]
         return subs, ins, dels
+
+
+class DiarizationEvaluator:
+    """
+    Diarization doğruluk değerlendirme motoru.
+    pyannote.metrics kullanarak DER hesaplar.
+    """
+    def __init__(self):
+        if not HAS_PYANNOTE_METRICS:
+            print("⚠️ pyannote.metrics bulunamadı! Lütfen kurun: pip install pyannote.metrics")
+        self.report = DiarizationReport()
+        self.metric = DiarizationErrorRate() if HAS_PYANNOTE_METRICS else None
+
+    def _create_annotation(self, intervals, uri="meeting"):
+        """List of dicts -> pyannote.core.Annotation"""
+        ann = Annotation(uri=uri)
+        for interval in intervals:
+            ann[Segment(interval["start"], interval["end"])] = interval["speaker"]
+        return ann
+
+    def evaluate(self, meeting_id, reference_intervals, hypothesis_intervals, duration):
+        """
+        Bir meeting için DER hesaplar.
+        intervals: [{"start": float, "end": float, "speaker": str}, ...]
+        """
+        if not self.metric:
+            return None
+
+        ref_ann = self._create_annotation(reference_intervals, uri=meeting_id)
+        hyp_ann = self._create_annotation(hypothesis_intervals, uri=meeting_id)
+
+        # Diğer pyannote versiyonlarında optimal mapping için uem gerekebilir ama basitçe hesaplayalım
+        mapping = self.metric.optimal_mapping(ref_ann, hyp_ann)
+        
+        # metric çağrısı componentleri biriktirir
+        der = self.metric(ref_ann, hyp_ann, detailed=True)
+        
+        # detaylı çıktılar
+        total = der["total"]
+        if total == 0:
+            total = 1e-8
+
+        result = DiarizationEvalResult(
+            meeting_id=meeting_id,
+            der=der["diarization error rate"],
+            false_alarm=der["false alarm"] / total,
+            missed_detection=der["missed detection"] / total,
+            confusion=der["confusion"] / total,
+            duration=duration
+        )
+        
+        self.report.results.append(result)
+        self.report.total_meetings += 1
+        return result
+
+    def print_report(self):
+        report = self.report
+        print("\n" + "=" * 70)
+        print("📊  BENCHMARK RAPORU — Diarization Doğruluk Testi (DER)")
+        print("=" * 70)
+
+        print(f"\n📋 Genel Bilgiler:")
+        print(f"   Toplam Meeting:     {report.total_meetings}")
+        print(f"   Toplam Ses Süresi:  {report.total_duration / 60:.1f} dakika")
+
+        if not report.results:
+            print("\n⚠️  Değerlendirilebilecek sonuç yok.")
+            return
+
+        print(f"\n📈 Doğruluk Metrikleri (Ortalama):")
+        print(f"   Diarization Error Rate (DER): {report.avg_der * 100:.2f}%")
+        print(f"   ├─ False Alarm:               {report.avg_false_alarm * 100:.2f}%")
+        print(f"   ├─ Missed Detection:          {report.avg_missed_detection * 100:.2f}%")
+        print(f"   └─ Speaker Confusion:         {report.avg_confusion * 100:.2f}%")
+
+        print(f"\n✅ Detaylı Sonuçlar:")
+        print("-" * 70)
+        for r in report.results:
+            print(f"   📁 {r.meeting_id} | DER: {r.der*100:.1f}% (FA: {r.false_alarm*100:.1f}%, Miss: {r.missed_detection*100:.1f}%, Conf: {r.confusion*100:.1f}%) | Süre: {r.duration:.1f}s")
+        print("\n" + "=" * 70)

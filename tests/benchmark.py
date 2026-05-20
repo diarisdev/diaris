@@ -30,8 +30,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from tests.dataset_manager import DatasetManager
-from tests.evaluator import TranscriptionEvaluator
+from tests.dataset_manager import DatasetManager, AmiDiarizationManager
+from tests.evaluator import TranscriptionEvaluator, DiarizationEvaluator
 
 
 def run_benchmark(limit=20, min_duration=2.0, max_duration=15.0, use_jiwer=False, csv_path=None):
@@ -150,6 +150,123 @@ def run_benchmark(limit=20, min_duration=2.0, max_duration=15.0, use_jiwer=False
     return evaluator.report
 
 
+def run_diarization_benchmark(max_minutes=None):
+    """
+    Diarization benchmark'ı (AMI Corpus ile).
+    Pyannote modelinin doğruluğunu DER (Diarization Error Rate) üzerinden test eder.
+    """
+    print("\n" + "=" * 70)
+    print("🧪  BENCHMARK BAŞLATILIYOR — Diarization Doğruluk Testi")
+    print("=" * 70)
+
+    print("\n📦 [Adım 1/3] Veri seti hazırlanıyor...")
+    dm = AmiDiarizationManager()
+    
+    if not dm.download():
+        print("❌ Veri seti indirilemedi. Benchmark iptal.")
+        return None
+
+    samples = dm.get_samples()
+    if not samples:
+        print("❌ Test örnekleri bulunamadı.")
+        return None
+
+    print(f"   📊 {len(samples)} meeting seçildi")
+
+    print("\n🧠 [Adım 2/3] Diarization modeli yükleniyor...")
+    from pyannote.audio import Pipeline
+    from src.config import DIARIZATION_CONFIG_PATH, HF_TOKEN, DEVICE
+    import torch
+
+    try:
+        if os.path.exists(DIARIZATION_CONFIG_PATH):
+            diarizer = Pipeline.from_pretrained(DIARIZATION_CONFIG_PATH)
+        else:
+            diarizer = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=HF_TOKEN)
+        
+        if DEVICE == "cuda":
+            diarizer.to(torch.device("cuda"))
+    except Exception as e:
+        print(f"❌ Model yüklenemedi: {e}")
+        return None
+
+    print(f"\n🔄 [Adım 3/3] {len(samples)} meeting test ediliyor...\n")
+    evaluator = DiarizationEvaluator()
+
+    for i, sample in enumerate(samples, 1):
+        meeting_id = sample["meeting_id"]
+        print(f"   [{i}/{len(samples)}] {meeting_id} ({sample['duration'] / 60:.1f} dk)...", end=" ", flush=True)
+        start_time = time.time()
+
+        try:
+            # Model inference (tüm dosya)
+            import soundfile as sf
+            import torch
+            
+            # Read all or max_minutes
+            if max_minutes:
+                frames_to_read = int(16000 * max_minutes * 60) # Assume 16kHz but sf will tell us
+                # First get sample rate
+                info = sf.info(sample["audio_path"])
+                sr = info.samplerate
+                frames_to_read = int(sr * max_minutes * 60)
+                audio_data, sample_rate = sf.read(sample["audio_path"], dtype="float32", frames=frames_to_read)
+                actual_duration = len(audio_data) / sample_rate
+            else:
+                audio_data, sample_rate = sf.read(sample["audio_path"], dtype="float32")
+                actual_duration = sample["duration"]
+                
+            if audio_data.ndim > 1:
+                audio_data = audio_data.mean(axis=1) # Mono'ya çevir
+            waveform = torch.from_numpy(audio_data).unsqueeze(0)
+            
+            pipeline_output = diarizer({"waveform": waveform, "sample_rate": sample_rate})
+            if hasattr(pipeline_output, "speaker_diarization"):
+                diarization = pipeline_output.speaker_diarization
+            else:
+                diarization = pipeline_output
+            
+            # Hypothesis interval'lara çevir
+            hyp_intervals = []
+            for turn, _, speaker in diarization.itertracks(yield_label=True):
+                hyp_intervals.append({"start": turn.start, "end": turn.end, "speaker": speaker})
+
+            # Reference interval'ları filtrele (truncate)
+            ref_intervals = sample["annotations"]
+            if max_minutes:
+                filtered_refs = []
+                for ann in ref_intervals:
+                    if ann["start"] >= actual_duration:
+                        continue
+                    new_ann = dict(ann)
+                    if new_ann["end"] > actual_duration:
+                        new_ann["end"] = actual_duration
+                    filtered_refs.append(new_ann)
+                ref_intervals = filtered_refs
+
+            elapsed = time.time() - start_time
+            
+            # Değerlendir
+            res = evaluator.evaluate(
+                meeting_id=meeting_id,
+                reference_intervals=ref_intervals,
+                hypothesis_intervals=hyp_intervals,
+                duration=actual_duration
+            )
+            
+            if res:
+                print(f"DER: {res.der * 100:.1f}% ({elapsed:.1f}s)")
+            else:
+                print(f"⚠️ Değerlendirme yapılamadı ({elapsed:.1f}s)")
+
+        except Exception as e:
+            print(f"❌ Hata: {e}")
+
+    # Rapor
+    evaluator.print_report()
+    return evaluator.report
+
+
 def main():
     """CLI giriş noktası."""
     parser = argparse.ArgumentParser(
@@ -183,6 +300,14 @@ def main():
         help="jiwer kütüphanesi kullan (daha hassas WER hesaplama)"
     )
     parser.add_argument(
+        "--task", type=str, choices=["transcription", "diarization"], default="transcription",
+        help="Çalıştırılacak benchmark görevi (varsayılan: transcription)"
+    )
+    parser.add_argument(
+        "--diarization-max-minutes", type=float, default=None,
+        help="Diarization testinde işlenecek maksimum ses süresi (dakika) (None: tamamı)"
+    )
+    parser.add_argument(
         "--download-only", action="store_true",
         help="Sadece veri setini indir, test çalıştırma"
     )
@@ -198,13 +323,16 @@ def main():
             print(f"   {key}: {val}")
         return
 
-    run_benchmark(
-        limit=args.limit,
-        min_duration=args.min_duration,
-        max_duration=args.max_duration,
-        use_jiwer=args.jiwer,
-        csv_path=args.csv,
-    )
+    if args.task == "diarization":
+        run_diarization_benchmark(max_minutes=args.diarization_max_minutes)
+    else:
+        run_benchmark(
+            limit=args.limit,
+            min_duration=args.min_duration,
+            max_duration=args.max_duration,
+            use_jiwer=args.jiwer,
+            csv_path=args.csv,
+        )
 
 
 if __name__ == "__main__":

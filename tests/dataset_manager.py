@@ -246,6 +246,115 @@ def _parse_transcription_file(trans_path):
     return transcriptions
 
 
+
+class AmiDiarizationManager:
+    """
+    AMI Meeting Corpus'un küçük bir alt kümesini indirir ve
+    Diarization testleri için hazırlar.
+    """
+    def __init__(self, data_dir=None):
+        self.data_dir = data_dir or DEFAULT_DATA_DIR
+        self.ami_dir = os.path.join(self.data_dir, "AMI_mini")
+        self.meetings = ["EN2001a", "ES2002a"] # Test için iki meeting
+
+    def is_downloaded(self):
+        if not os.path.isdir(self.ami_dir):
+            return False
+        for meeting in self.meetings:
+            wav_path = os.path.join(self.ami_dir, f"{meeting}.Mix-Headset.wav")
+            rttm_path = os.path.join(self.ami_dir, f"{meeting}.rttm")
+            if not os.path.exists(wav_path) or not os.path.exists(rttm_path):
+                return False
+        return True
+
+    def download(self, force=False):
+        if self.is_downloaded() and not force:
+            print("✅ AMI verileri zaten mevcut.")
+            return True
+
+        os.makedirs(self.ami_dir, exist_ok=True)
+        print("📥 AMI Diarization veri seti hazırlanıyor...")
+
+        # AMI-diarization-setup repo yolu
+        repo_rttm_dir = os.path.join(self.data_dir, "AMI-diarization-setup", "only_words", "rttms", "train")
+
+        for meeting in self.meetings:
+            wav_path = os.path.join(self.ami_dir, f"{meeting}.Mix-Headset.wav")
+            rttm_path = os.path.join(self.ami_dir, f"{meeting}.rttm")
+
+            if not os.path.exists(wav_path) or force:
+                url = f"https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/{meeting}/audio/{meeting}.Mix-Headset.wav"
+                print(f"   İndiriliyor: {meeting} audio...")
+                try:
+                    _download_with_progress(url, wav_path)
+                except Exception as e:
+                    print(f"❌ Ses indirme hatası ({meeting}): {e}")
+                    return False
+
+            if not os.path.exists(rttm_path) or force:
+                src_rttm = os.path.join(repo_rttm_dir, f"{meeting}.rttm")
+                if os.path.exists(src_rttm):
+                    shutil.copy2(src_rttm, rttm_path)
+                else:
+                    print(f"❌ RTTM bulunamadı: {src_rttm}")
+                    return False
+
+        print("✅ AMI veri seti başarıyla hazırlandı.")
+        return True
+
+    def get_samples(self):
+        """
+        Diarization test örneklerini döndürür.
+        """
+        if not self.is_downloaded():
+            print("⚠️ AMI verisi bulunamadı. Önce download() çağırın.")
+            return []
+
+        samples = []
+        for meeting in self.meetings:
+            wav_path = os.path.join(self.ami_dir, f"{meeting}.Mix-Headset.wav")
+            rttm_path = os.path.join(self.ami_dir, f"{meeting}.rttm")
+            
+            # Ses süresini al
+            try:
+                info = sf.info(wav_path)
+                duration = info.duration
+            except Exception:
+                duration = 0.0
+
+            # RTTM ayrıştır
+            annotations = self._parse_rttm(rttm_path)
+
+            samples.append({
+                "audio_path": wav_path,
+                "rttm_path": rttm_path,
+                "meeting_id": meeting,
+                "duration": duration,
+                "annotations": annotations
+            })
+        return samples
+
+    def _parse_rttm(self, rttm_path):
+        """
+        RTTM dosyasını ayrıştırıp speaker annotation listesi döner.
+        Format: SPEAKER file_id 1 start_time duration <NA> <NA> speaker_id <NA> <NA>
+        """
+        annotations = []
+        with open(rttm_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 8 and parts[0] == "SPEAKER":
+                    start_time = float(parts[3])
+                    duration = float(parts[4])
+                    speaker = parts[7]
+                    annotations.append({
+                        "start": start_time,
+                        "end": start_time + duration,
+                        "speaker": speaker
+                    })
+        return annotations
+
+
 if __name__ == "__main__":
     # Doğrudan çalıştırma: veri setini indir ve özet göster
     manager = DatasetManager()
