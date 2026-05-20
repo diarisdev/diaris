@@ -63,6 +63,14 @@ class SpeakerTracker:
         self._warmup_audio_ms = 0  # toplam işlenen ses süresi
         self._warmup_complete = False
 
+    def reset(self):
+        """Tracker durumunu sıfırlayarak yeni bir dosya için hazır hale getirir."""
+        self.known_speakers = {}
+        self._next_id = 0
+        self._warmup_buffer = []
+        self._warmup_audio_ms = 0
+        self._warmup_complete = False
+
     def _next_label(self):
         label = f"SPEAKER_{self._next_id:02d}"
         self._next_id += 1

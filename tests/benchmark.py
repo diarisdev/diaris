@@ -150,13 +150,13 @@ def run_benchmark(limit=20, min_duration=2.0, max_duration=15.0, use_jiwer=False
     return evaluator.report
 
 
-def run_diarization_benchmark(max_minutes=None):
+def run_diarization_benchmark_raw(max_minutes=None):
     """
     Diarization benchmark'ı (AMI Corpus ile).
     Pyannote modelinin doğruluğunu DER (Diarization Error Rate) üzerinden test eder.
     """
     print("\n" + "=" * 70)
-    print("🧪  BENCHMARK BAŞLATILIYOR — Diarization Doğruluk Testi")
+    print("🧪  BENCHMARK BAŞLATILIYOR — Diarization Doğruluk Testi (Saf Model Modu)")
     print("=" * 70)
 
     print("\n📦 [Adım 1/3] Veri seti hazırlanıyor...")
@@ -267,6 +267,173 @@ def run_diarization_benchmark(max_minutes=None):
     return evaluator.report
 
 
+def run_diarization_benchmark_aiworker(max_minutes=None):
+    """
+    Diarization benchmark'ı (AMI Corpus ile).
+    AIWorker'in canlı stream simülasyonunu yapar ve doğruluğunu test eder.
+    """
+    print("\n" + "=" * 70)
+    print("🧪  BENCHMARK BAŞLATILIYOR — Diarization Doğruluk Testi (AIWorker Modu)")
+    print("=" * 70)
+
+    print("\n📦 [Adım 1/3] Veri seti hazırlanıyor...")
+    dm = AmiDiarizationManager()
+    
+    if not dm.download():
+        print("❌ Veri seti indirilemedi. Benchmark iptal.")
+        return None
+
+    samples = dm.get_samples()
+    if not samples:
+        print("❌ Test örnekleri bulunamadı.")
+        return None
+
+    print(f"   📊 {len(samples)} meeting seçildi")
+
+    print("\n🧠 [Adım 2/3] AIWorker ve VADEngine yükleniyor...")
+    from src.audio.vad import VADEngine
+    from src.core.ai_worker import AIWorker
+    from src.config import FRAME_DURATION_MS, SILENCE_LIMIT, SHORT_SILENCE_LIMIT, SOFT_CHUNK_DURATION_MS, MAX_CHUNK_DURATION_MS
+    import soundfile as sf
+    import numpy as np
+    
+    vad_engine = VADEngine()
+    ai_worker = AIWorker(rate=16000, channels=1)
+    if not ai_worker.load_models():
+        print("❌ AIWorker yüklenemedi. Benchmark iptal.")
+        return None
+        
+    warmup_s = ai_worker.speaker_tracker.warmup_ms / 1000.0
+
+    print(f"\n🔄 [Adım 3/3] {len(samples)} meeting test ediliyor...\n")
+    evaluator = DiarizationEvaluator()
+
+    for i, sample in enumerate(samples, 1):
+        meeting_id = sample["meeting_id"]
+        print(f"   [{i}/{len(samples)}] {meeting_id} işleniyor...", flush=True)
+        start_time = time.time()
+
+        try:
+            # Sesi yükle ve int16'ya çevir (VAD ve AIWorker için)
+            if max_minutes:
+                info = sf.info(sample["audio_path"])
+                frames_to_read = int(info.samplerate * max_minutes * 60)
+                audio_data, sample_rate = sf.read(sample["audio_path"], dtype="int16", frames=frames_to_read)
+                actual_duration = len(audio_data) / sample_rate
+            else:
+                audio_data, sample_rate = sf.read(sample["audio_path"], dtype="int16")
+                actual_duration = sample["duration"]
+                
+            if audio_data.ndim > 1:
+                audio_data = audio_data.mean(axis=1).astype(np.int16)
+                
+            audio_bytes = audio_data.tobytes()
+            
+            # Tracker durumunu sıfırla
+            ai_worker.speaker_tracker.reset()
+            
+            # Stream simülasyonu değişkenleri
+            bytes_per_frame = int(sample_rate * (FRAME_DURATION_MS / 1000.0) * 2)
+            
+            chunk_buffer = []
+            silence_counter = 0
+            has_spoken = False
+            
+            hyp_intervals = []
+            global_time_s = 0.0
+            chunk_start_s = 0.0
+            
+            # Ses dosyasını frame frame işle
+            for offset in range(0, len(audio_bytes), bytes_per_frame):
+                frame_bytes = audio_bytes[offset:offset+bytes_per_frame]
+                if len(frame_bytes) < bytes_per_frame:
+                    break
+                    
+                is_speech, conf = vad_engine.check_speech(frame_bytes, sample_rate, 1)
+                
+                if is_speech:
+                    chunk_buffer.append(frame_bytes)
+                    silence_counter = 0
+                    if not has_spoken:
+                        has_spoken = True
+                        chunk_start_s = global_time_s
+                else:
+                    silence_bytes = b'\x00' * len(frame_bytes)
+                    if has_spoken:
+                        chunk_buffer.append(silence_bytes)
+                        silence_counter += 1
+                        
+                global_time_s += (FRAME_DURATION_MS / 1000.0)
+                
+                current_duration_ms = len(chunk_buffer) * FRAME_DURATION_MS
+                active_silence_limit = SHORT_SILENCE_LIMIT if current_duration_ms > SOFT_CHUNK_DURATION_MS else SILENCE_LIMIT
+                
+                if has_spoken and (silence_counter > active_silence_limit or current_duration_ms >= MAX_CHUNK_DURATION_MS):
+                    # AIWorker'a gönder
+                    chunk_bytes_to_send = b''.join(chunk_buffer)
+                    results = ai_worker.process_chunk(chunk_bytes_to_send)
+                    
+                    if results:
+                        for r in results:
+                            speaker = r["speaker"]
+                            # Kalibrasyon uyarısını yoksay
+                            if "Calibrating" not in speaker:
+                                global_start = chunk_start_s + r["start"]
+                                global_end = chunk_start_s + r["end"]
+                                
+                                # Warm-up süresi öncesini yoksay
+                                if global_end > warmup_s:
+                                    hyp_intervals.append({
+                                        "start": max(warmup_s, global_start),
+                                        "end": global_end,
+                                        "speaker": speaker
+                                    })
+                    
+                    # Bufferı sıfırla
+                    chunk_buffer = []
+                    silence_counter = 0
+                    has_spoken = False
+
+            # Referansları warm-up'ı yoksayacak şekilde filtrele
+            ref_intervals = sample["annotations"]
+            filtered_refs = []
+            for ann in ref_intervals:
+                if max_minutes and ann["start"] >= actual_duration:
+                    continue
+                if ann["end"] <= warmup_s:
+                    continue
+                    
+                new_ann = dict(ann)
+                new_ann["start"] = max(warmup_s, new_ann["start"])
+                if max_minutes:
+                    new_ann["end"] = min(actual_duration, new_ann["end"])
+                    
+                if new_ann["start"] < new_ann["end"]:
+                    filtered_refs.append(new_ann)
+
+            elapsed = time.time() - start_time
+            
+            # Değerlendir
+            res = evaluator.evaluate(
+                meeting_id=meeting_id,
+                reference_intervals=filtered_refs,
+                hypothesis_intervals=hyp_intervals,
+                duration=max(0.1, actual_duration - warmup_s)
+            )
+            
+            if res:
+                print(f"      DER: {res.der * 100:.1f}% ({elapsed:.1f}s)")
+            else:
+                print(f"      ⚠️ Değerlendirme yapılamadı ({elapsed:.1f}s)")
+
+        except Exception as e:
+            print(f"      ❌ Hata: {e}")
+
+    # Rapor
+    evaluator.print_report()
+    return evaluator.report
+
+
 def main():
     """CLI giriş noktası."""
     parser = argparse.ArgumentParser(
@@ -304,6 +471,10 @@ def main():
         help="Çalıştırılacak benchmark görevi (varsayılan: transcription)"
     )
     parser.add_argument(
+        "--diarization-mode", type=str, choices=["raw", "aiworker"], default="raw",
+        help="Diarization testinde kullanılacak mod (varsayılan: raw)"
+    )
+    parser.add_argument(
         "--diarization-max-minutes", type=float, default=None,
         help="Diarization testinde işlenecek maksimum ses süresi (dakika) (None: tamamı)"
     )
@@ -324,7 +495,10 @@ def main():
         return
 
     if args.task == "diarization":
-        run_diarization_benchmark(max_minutes=args.diarization_max_minutes)
+        if args.diarization_mode == "aiworker":
+            run_diarization_benchmark_aiworker(max_minutes=args.diarization_max_minutes)
+        else:
+            run_diarization_benchmark_raw(max_minutes=args.diarization_max_minutes)
     else:
         run_benchmark(
             limit=args.limit,
