@@ -34,7 +34,7 @@ from tests.dataset_manager import DatasetManager, AmiDiarizationManager
 from tests.evaluator import TranscriptionEvaluator, DiarizationEvaluator
 
 
-def run_benchmark(limit=20, min_duration=2.0, max_duration=15.0, use_jiwer=False, csv_path=None):
+def run_benchmark(limit=20, min_duration=2.0, max_duration=15.0, use_jiwer=False, csv_path=None, mode="aiworker"):
     """
     Ana benchmark fonksiyonu.
 
@@ -77,15 +77,20 @@ def run_benchmark(limit=20, min_duration=2.0, max_duration=15.0, use_jiwer=False
     total_duration = sum(s["duration"] for s in samples)
     print(f"   📊 {len(samples)} örnek seçildi (toplam {total_duration / 60:.1f} dakika ses)")
 
-    # --- 2. AI Worker ---
-    print("\n🧠 [Adım 2/4] AI modelleri yükleniyor...")
-    from src.core.ai_worker import AIWorker
-
-    # LibriSpeech 16kHz mono
-    ai_worker = AIWorker(rate=16000, channels=1)
-    if not ai_worker.load_models():
-        print("❌ AI modelleri yüklenemedi. Benchmark iptal.")
-        return None
+    # --- 2. AI Modelleri ---
+    print(f"\n🧠 [Adım 2/4] Transkripsiyon modeli yükleniyor ({mode} modu)...")
+    if mode == "aiworker":
+        from src.core.ai_worker import AIWorker
+        # LibriSpeech 16kHz mono
+        ai_worker = AIWorker(rate=16000, channels=1)
+        if not ai_worker.load_models():
+            print("❌ AI modelleri yüklenemedi. Benchmark iptal.")
+            return None
+    else:
+        from faster_whisper import WhisperModel
+        from src.config import WHISPER_PATH, DEVICE, COMPUTE_TYPE
+        ai_worker = None
+        transcriber = WhisperModel(WHISPER_PATH, device=DEVICE, compute_type=COMPUTE_TYPE)
 
     # --- 3. Test döngüsü ---
     print(f"\n🔄 [Adım 3/4] {len(samples)} örnek test ediliyor...\n")
@@ -98,23 +103,27 @@ def run_benchmark(limit=20, min_duration=2.0, max_duration=15.0, use_jiwer=False
         start_time = time.time()
 
         try:
-            # Ses dosyasını oku ve int16 bytes'a çevir
-            audio_data, sr = sf.read(sample["audio_path"], dtype="int16")
-
-            # Mono olduğundan emin ol
-            if audio_data.ndim > 1:
-                audio_data = audio_data[:, 0]
-
-            chunk_bytes = audio_data.tobytes()
-
-            # AIWorker ile işle
-            results = ai_worker.process_chunk(chunk_bytes)
+            if mode == "aiworker":
+                # Ses dosyasını oku ve int16 bytes'a çevir
+                audio_data, sr = sf.read(sample["audio_path"], dtype="int16")
+                if audio_data.ndim > 1:
+                    audio_data = audio_data[:, 0]
+                chunk_bytes = audio_data.tobytes()
+                
+                # AIWorker ile işle
+                results = ai_worker.process_chunk(chunk_bytes)
+                if results:
+                    hypothesis = " ".join(r["text"].strip() for r in results)
+                else:
+                    hypothesis = None
+            else:
+                # Raw model ile işle
+                segments, _ = transcriber.transcribe(sample["audio_path"], language="en")
+                hypothesis = " ".join(s.text.strip() for s in segments)
 
             elapsed = time.time() - start_time
 
-            if results:
-                # Tüm segmentleri birleştir
-                hypothesis = " ".join(r["text"].strip() for r in results)
+            if hypothesis:
                 eval_result = evaluator.evaluate(
                     reference=sample["transcript"],
                     hypothesis=hypothesis,
@@ -471,6 +480,10 @@ def main():
         help="Çalıştırılacak benchmark görevi (varsayılan: transcription)"
     )
     parser.add_argument(
+        "--transcription-mode", type=str, choices=["raw", "aiworker"], default="aiworker",
+        help="Transcription testinde kullanılacak mod (varsayılan: aiworker)"
+    )
+    parser.add_argument(
         "--diarization-mode", type=str, choices=["raw", "aiworker"], default="raw",
         help="Diarization testinde kullanılacak mod (varsayılan: raw)"
     )
@@ -506,6 +519,7 @@ def main():
             max_duration=args.max_duration,
             use_jiwer=args.jiwer,
             csv_path=args.csv,
+            mode=args.transcription_mode,
         )
 
 
