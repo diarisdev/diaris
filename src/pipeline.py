@@ -12,7 +12,7 @@ import threading
 import pyaudiowpatch as pyaudio
 import keyboard
 
-from .config import DEFAULT_RATE, DEFAULT_CHANNELS, FRAME_DURATION_MS, OUTPUT_FILENAME, SILENCE_LIMIT, SHORT_SILENCE_LIMIT, SOFT_CHUNK_DURATION_MS, MAX_CHUNK_DURATION_MS
+from .config import DEFAULT_RATE, DEFAULT_CHANNELS, FRAME_DURATION_MS, OUTPUT_FILENAME, SILENCE_LIMIT, SHORT_SILENCE_LIMIT, SOFT_CHUNK_DURATION_MS, MAX_CHUNK_DURATION_MS, SAVE_AUDIO_FILE
 from .audio.device import auto_detect_device
 from .audio.vad import VADEngine
 from .core.ai_worker import AIWorker, format_results
@@ -153,7 +153,7 @@ def run():
         audio_queue.put(None)
         ai_thread.join()
 
-        if frames:
+        if frames and SAVE_AUDIO_FILE:
             print("\n💾 Ana ses dosyası kaydediliyor...")
             with wave.open(OUTPUT_FILENAME, 'wb') as wf:
                 wf.setnchannels(channels)

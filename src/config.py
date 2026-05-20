@@ -37,6 +37,7 @@ FRAME_DURATION_MS = int(os.getenv("FRAME_DURATION_MS", "30"))
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 OUTPUT_FILENAME = os.path.join(OUTPUT_DIR, os.getenv("OUTPUT_FILENAME", "system_recorded.wav"))
+SAVE_AUDIO_FILE = os.getenv("SAVE_AUDIO_FILE", "false").lower() == "true"
 
 # --- Sessizlik Algılama ---
 SILENCE_LIMIT = int(os.getenv("SILENCE_LIMIT", "30"))
