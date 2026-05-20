@@ -142,6 +142,9 @@ def run_benchmark(limit=20, min_duration=2.0, max_duration=15.0, use_jiwer=False
     evaluator.print_report()
 
     if csv_path:
+        if not os.path.isabs(csv_path):
+            from src.config import OUTPUT_DIR
+            csv_path = os.path.join(OUTPUT_DIR, csv_path)
         evaluator.export_csv(csv_path)
 
     return evaluator.report
