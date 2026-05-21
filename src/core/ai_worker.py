@@ -219,23 +219,34 @@ class SpeakerTracker:
                     best_score = score
                     best_match = global_label
 
+            margin = 0.15  # Uncertainty Zone margin
+
             if best_match and best_score >= self.threshold:
                 mapping[local_label] = best_match
 
                 # Confidence-weighted güncelleme
                 if best_score > 0.85:
-                    # Yüksek güven → agresif güncelleme
                     alpha = 0.6
                 elif best_score > 0.70:
-                    # Orta güven → dengeli güncelleme
                     alpha = 0.8
                 else:
-                    # Düşük güven → muhafazakâr güncelleme
                     alpha = 0.95
 
                 self.known_speakers[best_match] = (
                     alpha * self.known_speakers[best_match] + (1 - alpha) * emb
                 )
+                
+                # Re-normalize baseline to prevent magnitude decay
+                norm = torch.norm(self.known_speakers[best_match])
+                if norm > 0:
+                    self.known_speakers[best_match] /= norm
+
+            elif best_match and best_score >= (self.threshold - margin):
+                # Uncertainty Zone: Belirsiz ses. Yeni kişi uydurma, en yakın kişiye ata.
+                # Ancak baseline'ı kirletmemek için GÜNCELLEME YAPMA.
+                mapping[local_label] = best_match
+                print(f"  ⚠️ Uncertain match: mapped to {best_match} (score: {best_score:.3f} < {self.threshold})")
+
             else:
                 # Yeni konuşmacı tespit edildi
                 new_label = self._next_label()
