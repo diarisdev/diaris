@@ -496,7 +496,14 @@ class AIWorker:
                 else:
                     emb_tensor = torch.tensor(emb_output).float()
 
-                embeddings_dict[spk] = emb_tensor.squeeze().cpu()
+                emb_tensor = emb_tensor.squeeze().cpu()
+                
+                # 5. L2 Normalization (Prevents scale issues in clustering/similarity)
+                emb_norm = torch.norm(emb_tensor)
+                if emb_norm > 0:
+                    emb_tensor = emb_tensor / emb_norm
+                    
+                embeddings_dict[spk] = emb_tensor
 
             except Exception as e:
                 print(f"  ⚠️ [Embedding] {spk}: {e}")
