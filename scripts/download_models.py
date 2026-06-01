@@ -1,44 +1,79 @@
-"""
-Model İndirme Aracı.
+"""Download local model assets used by Audio-process."""
 
-Whisper ve Pyannote modellerini Hugging Face'den indirir
-ve models/ dizinine kaydeder.
+from __future__ import annotations
 
-Kullanım:
-    python scripts/download_models.py
-"""
-
-from huggingface_hub import snapshot_download
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
+from huggingface_hub import snapshot_download
 
-# Proje kökündeki .env dosyasını yükle
-load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MODELS_DIR = PROJECT_ROOT / "models"
 
-HF_TOKEN = os.getenv("HF_TOKEN")
+MODEL_SPECS = [
+    {
+        "name": "Faster-Whisper",
+        "repo_id": "Systran/faster-whisper-small",
+        "local_dir": MODELS_DIR / "whisper-small",
+        "requires_token": False,
+        "ignore_patterns": ["*.msgpack", "*.h5"],
+    },
+    {
+        "name": "Pyannote Segmentation",
+        "repo_id": "pyannote/segmentation-3.0",
+        "local_dir": MODELS_DIR / "pyannote-segmentation",
+        "requires_token": True,
+        "ignore_patterns": None,
+    },
+    {
+        "name": "Pyannote Speaker Embeddings",
+        "repo_id": "pyannote/wespeaker-voxceleb-resnet34-LM",
+        "local_dir": MODELS_DIR / "pyannote-embeddings",
+        "requires_token": True,
+        "ignore_patterns": None,
+    },
+]
 
-# Modelleri proje kökündeki models/ dizinine kaydet
-BASE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 
-print("⬇️ Downloading Faster-Whisper...")
-snapshot_download(
-    repo_id="Systran/faster-whisper-small",
-    local_dir=os.path.join(BASE_DIR, "whisper-small"),
-    ignore_patterns=["*.msgpack", "*.h5"]  # We only need the .bin files
-)
+def _has_files(path: Path) -> bool:
+    return path.exists() and any(path.iterdir())
 
-print("⬇️ Downloading Pyannote Segmentation...")
-snapshot_download(
-    repo_id="pyannote/segmentation-3.0",
-    local_dir=os.path.join(BASE_DIR, "pyannote-segmentation"),
-    token=HF_TOKEN
-)
 
-print("⬇️ Downloading Pyannote Speaker Embeddings...")
-snapshot_download(
-    repo_id="pyannote/wespeaker-voxceleb-resnet34-LM",
-    local_dir=os.path.join(BASE_DIR, "pyannote-embeddings"),
-    token=HF_TOKEN
-)
+def download_models(force: bool = False) -> bool:
+    """Download missing model folders. Returns True when all required assets exist."""
+    load_dotenv(PROJECT_ROOT / ".env")
+    hf_token = os.getenv("HF_TOKEN")
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-print(f"✅ All models downloaded to: {BASE_DIR}")
+    for spec in MODEL_SPECS:
+        name = spec["name"]
+        local_dir = spec["local_dir"]
+
+        if _has_files(local_dir) and not force:
+            print(f"✅ {name} zaten mevcut: {local_dir}")
+            continue
+
+        if spec["requires_token"] and not hf_token:
+            print(f"❌ {name} için HF_TOKEN gerekli.")
+            print("   .env içine HF_TOKEN=... ekleyin ve Hugging Face model erişimlerini kabul edin.")
+            return False
+
+        print(f"⬇️ {name} indiriliyor...")
+        try:
+            snapshot_download(
+                repo_id=spec["repo_id"],
+                local_dir=str(local_dir),
+                token=hf_token if spec["requires_token"] else None,
+                ignore_patterns=spec["ignore_patterns"],
+            )
+        except Exception as exc:
+            print(f"❌ {name} indirilemedi: {exc}")
+            return False
+
+    print(f"✅ Modeller hazır: {MODELS_DIR}")
+    return True
+
+
+if __name__ == "__main__":
+    raise SystemExit(0 if download_models(force=False) else 1)
