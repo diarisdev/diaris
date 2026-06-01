@@ -19,6 +19,7 @@ Warm-up mekanizması:
 - Speaker label smoothing (< 1s segmentleri birleştir)
 """
 
+import logging
 import os
 import tempfile
 import numpy as np
@@ -35,10 +36,20 @@ from ..config import (
     DEFAULT_RATE, DEFAULT_CHANNELS, WHISPER_LANGUAGE,
     DIARIZATION_EMBEDDING_THRESHOLD, DIARIZATION_WARMUP_MS,
 )
+from ..audio.utils import calculate_chunk_duration_ms
+from .formatting import format_results
+
+logger = logging.getLogger(__name__)
 
 # Minimum embedding requirements
 MIN_SPEECH_DURATION_FOR_EMBEDDING = 1.5  # saniye — embedding için min konuşma süresi
 MIN_AUDIO_RMS_FOR_EMBEDDING = 0.01       # min RMS enerji — sessizliği filtrele
+
+
+def load_silero_vad():
+    """Load Silero VAD through one mockable boundary."""
+    model, utils = torch.hub.load("snakers4/silero-vad", "silero_vad", trust_repo=True)
+    return model, utils
 
 
 class SpeakerTracker:
@@ -291,6 +302,11 @@ class AIWorker:
 
         print(f"\n🧠 [AI Worker] {DEVICE.upper()} üzerinde başlatılıyor...")
         try:
+            if not os.path.isdir(WHISPER_PATH):
+                print(f"❌ [AI Worker Error] Whisper modeli bulunamadı: {WHISPER_PATH}")
+                print("   Modelleri indirmek için: python scripts/download_models.py")
+                return False
+
             # Diarizer: Yerel config dosyasından yükle
             if os.path.exists(DIARIZATION_CONFIG_PATH):
                 print(f"📂 [AI Worker] Local diarization config: {DIARIZATION_CONFIG_PATH}")
@@ -298,6 +314,10 @@ class AIWorker:
                     DIARIZATION_CONFIG_PATH,
                 )
             else:
+                if not HF_TOKEN:
+                    print("❌ [AI Worker Error] HF_TOKEN yok ve yerel diarization config bulunamadı.")
+                    print(f"   Beklenen yerel config: {DIARIZATION_CONFIG_PATH}")
+                    return False
                 print("⚠️ [AI Worker] Local config not found, loading from HuggingFace...")
                 self.diarizer = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
@@ -323,11 +343,10 @@ class AIWorker:
 
             # Silero VAD: Speech-only embedding extraction için
             try:
-                self.silero_vad, _ = torch.hub.load(
-                    'snakers4/silero-vad', 'silero_vad', trust_repo=True
-                )
+                self.silero_vad, _ = load_silero_vad()
                 print("✅ [AI Worker] Silero VAD loaded (speech-only embedding enabled)")
-            except Exception:
+            except Exception as vad_err:
+                logger.warning("Silero VAD could not be loaded: %s", vad_err)
                 self.silero_vad = None
 
             self.transcriber = WhisperModel(
@@ -384,7 +403,8 @@ class AIWorker:
                 filtered, sample_rate=16000, cutoff_freq=3500.0
             )
             return filtered
-        except Exception:
+        except Exception as exc:
+            logger.debug("Bandpass filter failed, using original waveform: %s", exc)
             return waveform_16k
 
     def _extract_speech_only(self, waveform_16k_1d):
@@ -437,7 +457,8 @@ class AIWorker:
                 return torch.cat(speech_parts)
             return waveform_16k_1d
 
-        except Exception:
+        except Exception as exc:
+            logger.debug("Speech-only extraction failed, using original waveform: %s", exc)
             return waveform_16k_1d
 
     def _extract_speaker_embeddings(self, waveform_16k, turns):
@@ -523,8 +544,7 @@ class AIWorker:
 
     def _get_chunk_duration_ms(self, chunk_bytes):
         """Chunk süresini ms cinsinden hesaplar."""
-        num_samples = len(chunk_bytes) // (2 * self.channels)  # int16 = 2 bytes
-        return (num_samples / self.rate) * 1000
+        return calculate_chunk_duration_ms(chunk_bytes, self.rate, self.channels)
 
     def _smooth_speaker_labels(self, results):
         """
@@ -692,29 +712,5 @@ class AIWorker:
             if tmp_path and os.path.exists(tmp_path):
                 try:
                     os.remove(tmp_path)
-                except Exception:
-                    pass
-
-
-def format_results(results, return_str=False):
-    """
-    AI sonuçlarını okunabilir formatta yazdırır veya döndürür.
-
-    Args:
-        results: process_chunk'tan dönen sonuç listesi
-        return_str: True ise sonucu metin olarak döndürür, False ise terminale basar.
-    """
-    if not results:
-        return "" if return_str else None
-
-    lines = ["-" * 50]
-    for r in results:
-        lines.append(f"[{r['speaker']}] {r['start']:.1f}s - {r['end']:.1f}s: {r['text']}")
-    lines.append("-" * 50)
-    
-    out_str = "\n".join(lines)
-    
-    if return_str:
-        return out_str
-        
-    print("\n" + out_str + "\n")
+                except OSError as exc:
+                    logger.warning("Could not delete temporary file %s: %s", tmp_path, exc)

@@ -1,10 +1,13 @@
-"""
-core — AI Motor Katmanı
+"""AI engine helpers."""
 
-Modüller:
-    ai_worker : Whisper transkripsiyon + Pyannote konuşmacı ayrıştırma
-"""
-
-from .ai_worker import AIWorker, format_results
+from .formatting import format_results
 
 __all__ = ["AIWorker", "format_results"]
+
+
+def __getattr__(name):
+    if name == "AIWorker":
+        from .ai_worker import AIWorker
+
+        return AIWorker
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
