@@ -5,6 +5,22 @@ Hiçbir cihaz adı hardcoded değildir — her bilgisayarda otomatik çalışır
 """
 
 
+def list_loopback_devices(p):
+    """
+    Tüm WASAPI loopback cihazlarını listeler.
+
+    Args:
+        p: PyAudio instance (pyaudiowpatch)
+
+    Returns:
+        list[dict]: Bulunan loopback cihazlarının bilgileri.
+    """
+    try:
+        return list(p.get_loopback_device_info_generator())
+    except Exception:
+        return []
+
+
 def find_loopback_device(p):
     """
     WASAPI Loopback cihazını otomatik olarak bulur.

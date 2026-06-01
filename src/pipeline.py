@@ -147,12 +147,16 @@ def _save_recording(frames, channels, rate, sample_width, on_status_change=None)
     _emit_status(f"✅ Dosya kaydedildi: {os.path.abspath(OUTPUT_FILENAME)}", on_status_change)
 
 
-def run(stop_event=None, on_status_change=None, on_transcription=None, allow_interactive_device=False):
+def run(stop_event=None, on_status_change=None, on_transcription=None, allow_interactive_device=False, device_index=None):
     """
     Run the live recording and transcription loop.
 
     GUI callers should keep allow_interactive_device=False so failed auto-detection
     reports a status instead of blocking on input(). CLI callers can set it to True.
+
+    Args:
+        device_index: Specific PyAudio device index to use. When provided,
+                      auto-detection is skipped entirely.
     """
     p = pyaudio.PyAudio()
     stream = None
@@ -163,13 +167,20 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, allow_int
     rate = None
 
     try:
-        result = auto_detect_device(p, allow_interactive=allow_interactive_device)
-        if result is None:
-            _emit_status("❌ Uygun ses cihazı bulunamadı.", on_status_change)
-            return
+        if device_index is not None:
+            device_info = p.get_device_info_by_index(device_index)
+            channels = max(int(device_info["maxInputChannels"]), 1)
+            rate = int(device_info["defaultSampleRate"])
+            print(f"✅ Seçilen cihaz: {device_info['name']}")
+            print(f"   Kanal: {channels} | Hız: {rate} Hz")
+        else:
+            result = auto_detect_device(p, allow_interactive=allow_interactive_device)
+            if result is None:
+                _emit_status("❌ Uygun ses cihazı bulunamadı.", on_status_change)
+                return
 
-        device_info, channels, rate = result
-        device_index = device_info["index"]
+            device_info, channels, rate = result
+            device_index = device_info["index"]
         frame_size = int(rate * FRAME_DURATION_MS / 1000)
 
         vad_engine = VADEngine()

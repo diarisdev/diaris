@@ -1,6 +1,12 @@
 import customtkinter as ctk
 import threading
+
+# pyrefly: ignore [missing-import]
+import pyaudiowpatch as pyaudio
+
+from .audio.device import list_loopback_devices
 from .pipeline import run
+
 
 class AudioProcessApp(ctk.CTk):
     def __init__(self):
@@ -8,104 +14,202 @@ class AudioProcessApp(ctk.CTk):
 
         self.title("Audio Process AI")
         self.geometry("900x650")
-        
+
         # Tema ayarları
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
-        
+
         # Ana çerçeve
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
-        
+
         self.main_frame = ctk.CTkFrame(self)
         self.main_frame.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
-        
-        self.main_frame.grid_rowconfigure(1, weight=1)
+
+        self.main_frame.grid_rowconfigure(2, weight=1)
         self.main_frame.grid_columnconfigure(0, weight=1)
-        
-        # Üst Panel (Durum ve Butonlar)
+
+        # --- Cihaz Seçimi ---
+        self.device_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.device_frame.grid(row=0, column=0, padx=10, pady=(10, 0), sticky="ew")
+
+        device_label = ctk.CTkLabel(
+            self.device_frame,
+            text="Ses Cihazı:",
+            font=ctk.CTkFont(size=13),
+        )
+        device_label.pack(side="left", padx=(10, 5))
+
+        self.device_combo = ctk.CTkComboBox(
+            self.device_frame,
+            state="readonly",
+            width=500,
+            font=ctk.CTkFont(size=12),
+        )
+        self.device_combo.pack(side="left", fill="x", expand=True, padx=5)
+        self.device_combo.set("Cihaz taranıyor...")
+
+        self.refresh_btn = ctk.CTkButton(
+            self.device_frame,
+            text="⟳",
+            width=35,
+            command=self.refresh_devices,
+        )
+        self.refresh_btn.pack(side="left", padx=(0, 10))
+
+        # --- Üst Panel (Durum ve Butonlar) ---
         self.top_panel = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.top_panel.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
-        
+        self.top_panel.grid(row=1, column=0, padx=10, pady=10, sticky="ew")
+
         self.status_label = ctk.CTkLabel(
-            self.top_panel, 
-            text="Hazır.", 
-            font=ctk.CTkFont(size=16, weight="bold")
+            self.top_panel,
+            text="Hazır.",
+            font=ctk.CTkFont(size=16, weight="bold"),
         )
         self.status_label.pack(side="left", padx=10)
-        
+
         self.stop_btn = ctk.CTkButton(
-            self.top_panel, 
-            text="Durdur", 
-            fg_color="#e74c3c", 
+            self.top_panel,
+            text="Durdur",
+            fg_color="#e74c3c",
             hover_color="#c0392b",
             state="disabled",
-            command=self.stop_recording
+            command=self.stop_recording,
         )
         self.stop_btn.pack(side="right", padx=10)
-        
+
         self.start_btn = ctk.CTkButton(
-            self.top_panel, 
-            text="Başlat", 
-            fg_color="#2ecc71", 
+            self.top_panel,
+            text="Başlat",
+            fg_color="#2ecc71",
             hover_color="#27ae60",
-            command=self.start_recording
+            command=self.start_recording,
         )
         self.start_btn.pack(side="right", padx=10)
-        
-        # Transkripsiyon Alanı
+
+        # --- Transkripsiyon Alanı ---
         self.textbox = ctk.CTkTextbox(
-            self.main_frame, 
+            self.main_frame,
             font=ctk.CTkFont(family="Consolas", size=14),
-            wrap="word"
+            wrap="word",
         )
-        self.textbox.grid(row=1, column=0, padx=10, pady=10, sticky="nsew")
+        self.textbox.grid(row=2, column=0, padx=10, pady=10, sticky="nsew")
         self.textbox.insert("0.0", "Yapay zeka sonuçları burada görünecek...\n\n")
-        
+
         # Arka plan thread değişkenleri
         self.pipeline_thread = None
         self.stop_event = threading.Event()
-        
+
+        # Cihaz listesi
+        self.loopback_devices = []
+        self.refresh_devices()
+
+    # ------------------------------------------------------------------ #
+    #  Cihaz yönetimi                                                     #
+    # ------------------------------------------------------------------ #
+
+    def refresh_devices(self):
+        """Loopback cihazlarını tarayıp combobox'a yükler. Varsayılan cihazı seçer."""
+        p = pyaudio.PyAudio()
+        default_name = ""
+        try:
+            self.loopback_devices = list_loopback_devices(p)
+            try:
+                default_output = p.get_default_output_device_info()
+                default_name = default_output["name"].lower()
+            except Exception:
+                pass
+        finally:
+            p.terminate()
+
+        if self.loopback_devices:
+            default_idx = 0
+            names = []
+            for i, dev in enumerate(self.loopback_devices):
+                name = dev["name"]
+                if default_name and default_name in name.lower():
+                    name += "  (Varsayılan)"
+                    default_idx = i
+                names.append(name)
+
+            self._device_display_names = names
+            self.device_combo.configure(values=names)
+            self.device_combo.set(names[default_idx])
+        else:
+            self._device_display_names = []
+            self.device_combo.configure(values=["Loopback cihazı bulunamadı"])
+            self.device_combo.set("Loopback cihazı bulunamadı")
+
+    def _get_selected_device_index(self):
+        """Seçili cihazın PyAudio device index'ini döndürür."""
+        if not self.loopback_devices:
+            return None
+
+        selected = self.device_combo.get()
+        for i, display_name in enumerate(self._device_display_names):
+            if display_name == selected:
+                return self.loopback_devices[i]["index"]
+        return None
+
+    # ------------------------------------------------------------------ #
+    #  Pipeline callback'leri                                             #
+    # ------------------------------------------------------------------ #
+
     def on_status_change(self, status_text):
         # UI güncellemeleri ana thread'de yapılmalı
         self.after(0, lambda: self.status_label.configure(text=status_text))
-        
+
     def on_transcription(self, text):
         def append_text():
             self.textbox.insert("end", text + "\n\n")
             self.textbox.see("end")
         self.after(0, append_text)
-        
+
+    # ------------------------------------------------------------------ #
+    #  Kayıt kontrolleri                                                  #
+    # ------------------------------------------------------------------ #
+
     def start_recording(self):
+        device_index = self._get_selected_device_index()
+        if device_index is None:
+            self.on_status_change("❌ Ses cihazı seçilmedi.")
+            return
+
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
+        self.device_combo.configure(state="disabled")
+        self.refresh_btn.configure(state="disabled")
+
         self.textbox.insert("end", "==================================================\n")
         self.textbox.insert("end", "🔴 CANLI DİNLENİYOR VE ÇEVRİLİYOR...\n")
         self.textbox.insert("end", "==================================================\n\n")
         self.textbox.see("end")
-        
+
         self.stop_event.clear()
-        
+
         # Arka planda pipeline'ı başlat
         self.pipeline_thread = threading.Thread(
-            target=run, 
+            target=run,
             kwargs={
                 "stop_event": self.stop_event,
                 "on_status_change": self.on_status_change,
-                "on_transcription": self.on_transcription
+                "on_transcription": self.on_transcription,
+                "device_index": device_index,
             },
-            daemon=True
+            daemon=True,
         )
         self.pipeline_thread.start()
-        
+
     def stop_recording(self):
         self.stop_btn.configure(state="disabled")
         self.stop_event.set()
         # Thread'in güvenle kapanmasını beklemek için kontrol döngüsü başlat
         self.after(1000, self.check_thread_dead)
-        
+
     def check_thread_dead(self):
         if self.pipeline_thread and self.pipeline_thread.is_alive():
             self.after(500, self.check_thread_dead)
         else:
             self.start_btn.configure(state="normal")
+            self.device_combo.configure(state="readonly")
+            self.refresh_btn.configure(state="normal")
