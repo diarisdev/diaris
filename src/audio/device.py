@@ -116,14 +116,15 @@ def select_device_interactive(p):
             print("⚠️ Geçersiz giriş.")
 
 
-def auto_detect_device(p):
+def auto_detect_device(p, allow_interactive=True):
     """
     Tam otomatik cihaz algılama akışı:
     1. WASAPI Loopback dene
-    2. Bulamazsa kullanıcıya sor
+    2. Bulamazsa, izin verildiyse kullanıcıya sor
 
     Args:
         p: PyAudio instance
+        allow_interactive: False ise otomatik algılama başarısız olduğunda input() çağırmaz.
 
     Returns:
         tuple[dict, int, int] veya None:
@@ -140,6 +141,9 @@ def auto_detect_device(p):
 
     # 2. Fallback: Kullanıcıya sor
     print("⚠️ Otomatik loopback cihazı bulunamadı.")
+    if not allow_interactive:
+        return None
+
     selected = select_device_interactive(p)
     if selected:
         channels = max(int(selected["maxInputChannels"]), 1)

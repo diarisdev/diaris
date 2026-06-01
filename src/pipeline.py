@@ -1,104 +1,186 @@
-"""
-Canlı kayıt ve ana iş akışı modülü.
-Ses cihazından canlı okuma, VAD ile konuşma algılama,
-ve AI worker thread'e ses parçası gönderme mantığını içerir.
+"""Live recording and transcription pipeline."""
 
-Daha uzun chunk'lar kullanarak diarization kalitesini artırır.
-"""
+from __future__ import annotations
 
-import wave
+import logging
 import os
 import queue
 import threading
-# pyrefly: ignore [missing-import]
-import pyaudiowpatch as pyaudio
+import wave
+from dataclasses import dataclass, field
+
 import keyboard
 
-from .config import DEFAULT_RATE, DEFAULT_CHANNELS, FRAME_DURATION_MS, OUTPUT_FILENAME, SILENCE_LIMIT, SHORT_SILENCE_LIMIT, SOFT_CHUNK_DURATION_MS, MAX_CHUNK_DURATION_MS, SAVE_AUDIO_FILE
+# pyrefly: ignore [missing-import]
+import pyaudiowpatch as pyaudio
+
 from .audio.device import auto_detect_device
 from .audio.vad import VADEngine
-from .core.ai_worker import AIWorker, format_results
+from .config import (
+    FRAME_DURATION_MS,
+    MAX_CHUNK_DURATION_MS,
+    OUTPUT_FILENAME,
+    SAVE_AUDIO_FILE,
+    SHORT_SILENCE_LIMIT,
+    SILENCE_LIMIT,
+    SOFT_CHUNK_DURATION_MS,
+    ensure_output_dir,
+)
+from .core.ai_worker import AIWorker
+from .core.formatting import format_results
 
+logger = logging.getLogger(__name__)
 FORMAT = pyaudio.paInt16
+STOP_SENTINEL = None
+
+
+@dataclass
+class RecordingState:
+    frames: list[bytes] = field(default_factory=list)
+    chunk_buffer: list[bytes] = field(default_factory=list)
+    silence_counter: int = 0
+    has_spoken: bool = False
+
+    @property
+    def chunk_duration_ms(self) -> int:
+        return len(self.chunk_buffer) * FRAME_DURATION_MS
+
+    def reset_chunk(self) -> None:
+        self.chunk_buffer = []
+        self.silence_counter = 0
+        self.has_spoken = False
+
+
+def _emit_status(message: str, on_status_change=None) -> None:
+    print(message)
+    if on_status_change:
+        on_status_change(message)
 
 
 def _worker_loop(audio_queue, ai_worker, on_transcription=None):
-    """
-    Arka planda çalışan AI iş parçacığı döngüsü.
-    Kuyruktan ses parçaları alır, işler ve sonuçları yazdırır.
-
-    Args:
-        audio_queue: Ses parçalarını içeren thread-safe kuyruk
-        ai_worker: AIWorker instance
-        on_transcription: Arayüze metin yollamak için callback
-    """
+    """Process queued audio chunks until a sentinel is received."""
     if not ai_worker.load_models():
         return
 
     while True:
         chunk_bytes = audio_queue.get()
-        if chunk_bytes is None:
-            break
+        try:
+            if chunk_bytes is STOP_SENTINEL:
+                return
 
-        results = ai_worker.process_chunk(chunk_bytes)
-        
-        # Sonuçları formatla
-        formatted_str = format_results(results, return_str=True)
-        
-        if formatted_str:
-            if on_transcription:
-                on_transcription(formatted_str)
-            else:
-                print("\n" + formatted_str + "\n")
-                
-        audio_queue.task_done()
+            results = ai_worker.process_chunk(chunk_bytes)
+            formatted_str = format_results(results, return_str=True)
+
+            if formatted_str:
+                if on_transcription:
+                    on_transcription(formatted_str)
+                else:
+                    print("\n" + formatted_str + "\n")
+        except Exception:
+            logger.exception("AI worker failed while processing a chunk")
+        finally:
+            audio_queue.task_done()
 
 
-def run(stop_event=None, on_status_change=None, on_transcription=None):
-    """
-    Ana canlı kayıt ve transkripsiyon döngüsü.
-    
-    1. Ses cihazını otomatik algılar (loopback veya kullanıcı seçimi)
-    2. Cihazın kanal sayısı ve örnekleme hızını otomatik alır
-    3. VAD motorunu başlatır
-    4. AI worker thread'i arka planda başlatır
-    5. Canlı ses okur, VAD ile filtreler, konuşma bitince chunk'ı AI'a gönderir
-    6. stop_event ile tetiklenince durur (veya CTRL+Q tuşlarıyla durur).
-    """
-    p = pyaudio.PyAudio()
+def _should_stop(stop_event) -> bool:
+    if stop_event and stop_event.is_set():
+        return True
+    if stop_event:
+        return False
+    return keyboard.is_pressed("ctrl+q")
 
-    # Otomatik cihaz algılama — hardcoded değer yok
-    result = auto_detect_device(p)
-    if result is None:
-        msg = "❌ Uygun ses cihazı bulunamadı."
-        print(msg)
-        if on_status_change: on_status_change(msg)
-        p.terminate()
+
+def _update_recording_state(state: RecordingState, data: bytes, is_speech: bool) -> str:
+    if is_speech:
+        state.frames.append(data)
+        state.chunk_buffer.append(data)
+        state.silence_counter = 0
+        state.has_spoken = True
+        return "🎙️  [ KONUŞULUYOR ]"
+
+    silence_bytes = b"\x00" * len(data)
+    state.frames.append(silence_bytes)
+
+    if state.has_spoken:
+        state.chunk_buffer.append(silence_bytes)
+        state.silence_counter += 1
+        return "⏱️  [ BEKLENİYOR ] "
+
+    return "😶 [ SESSİZLİK ]  "
+
+
+def _active_silence_limit(chunk_duration_ms: int) -> int:
+    if chunk_duration_ms > SOFT_CHUNK_DURATION_MS:
+        return SHORT_SILENCE_LIMIT
+    return SILENCE_LIMIT
+
+
+def _flush_chunk_if_ready(state: RecordingState, audio_queue) -> bool:
+    duration_ms = state.chunk_duration_ms
+    silence_limit = _active_silence_limit(duration_ms)
+    should_flush = (
+        state.has_spoken
+        and (state.silence_counter > silence_limit or duration_ms >= MAX_CHUNK_DURATION_MS)
+    )
+    if not should_flush:
+        return False
+
+    if state.chunk_buffer:
+        audio_queue.put(b"".join(state.chunk_buffer))
+    state.reset_chunk()
+    return True
+
+
+def _save_recording(frames, channels, rate, sample_width, on_status_change=None) -> None:
+    if not frames or not SAVE_AUDIO_FILE:
         return
 
-    device_info, channels, rate = result
-    device_index = device_info["index"]
-    frame_size = int(rate * FRAME_DURATION_MS / 1000)
+    ensure_output_dir()
+    _emit_status("\n💾 Ana ses dosyası kaydediliyor...", on_status_change)
 
-    # VAD motoru
-    vad_engine = VADEngine()
+    with wave.open(OUTPUT_FILENAME, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(sample_width)
+        wf.setframerate(rate)
+        wf.writeframes(b"".join(frames))
 
-    # AI worker + kuyruk — rate ve channels dinamik geçirilir
-    audio_queue = queue.Queue()
-    ai_worker = AIWorker(rate=rate, channels=channels)
-    ai_thread = threading.Thread(
-        target=_worker_loop, args=(audio_queue, ai_worker, on_transcription), daemon=True
-    )
-    ai_thread.start()
+    _emit_status(f"✅ Dosya kaydedildi: {os.path.abspath(OUTPUT_FILENAME)}", on_status_change)
 
-    # Kayıt durumu
-    frames = []
-    chunk_buffer = []
-    silence_counter = 0
-    has_spoken = False
+
+def run(stop_event=None, on_status_change=None, on_transcription=None, allow_interactive_device=False):
+    """
+    Run the live recording and transcription loop.
+
+    GUI callers should keep allow_interactive_device=False so failed auto-detection
+    reports a status instead of blocking on input(). CLI callers can set it to True.
+    """
+    p = pyaudio.PyAudio()
     stream = None
+    audio_queue = queue.Queue()
+    ai_thread = None
+    state = RecordingState()
+    channels = None
+    rate = None
 
     try:
+        result = auto_detect_device(p, allow_interactive=allow_interactive_device)
+        if result is None:
+            _emit_status("❌ Uygun ses cihazı bulunamadı.", on_status_change)
+            return
+
+        device_info, channels, rate = result
+        device_index = device_info["index"]
+        frame_size = int(rate * FRAME_DURATION_MS / 1000)
+
+        vad_engine = VADEngine()
+        ai_worker = AIWorker(rate=rate, channels=channels)
+        ai_thread = threading.Thread(
+            target=_worker_loop,
+            args=(audio_queue, ai_worker, on_transcription),
+            daemon=True,
+        )
+        ai_thread.start()
+
         stream = p.open(
             format=FORMAT,
             channels=channels,
@@ -110,85 +192,41 @@ def run(stop_event=None, on_status_change=None, on_transcription=None):
 
         msg = "🔴 CANLI DİNLENİYOR VE ÇEVRİLİYOR..."
         print("\n" + "=" * 40 + "\n" + msg + "\n" + "=" * 40 + "\n")
-        if on_status_change: on_status_change(msg)
+        if on_status_change:
+            on_status_change(msg)
 
-        while True:
-            # Stop condition
-            if stop_event and stop_event.is_set():
-                break
-            if not stop_event and keyboard.is_pressed("ctrl+q"):
-                break
-
+        while not _should_stop(stop_event):
             data = stream.read(frame_size, exception_on_overflow=False)
-            is_speech, conf = vad_engine.check_speech(data, rate, channels)
+            is_speech, confidence = vad_engine.check_speech(data, rate, channels)
+            status = _update_recording_state(state, data, is_speech)
 
-            if is_speech:
-                frames.append(data)
-                chunk_buffer.append(data)
-                silence_counter = 0
-                has_spoken = True
-                status = "🎙️  [ KONUŞULUYOR ]"
-            else:
-                silence_bytes = b'\x00' * len(data)
-                frames.append(silence_bytes)
-
-                if has_spoken:
-                    chunk_buffer.append(silence_bytes)
-                    silence_counter += 1
-                    status = "⏱️  [ BEKLENİYOR ] "
-                else:
-                    status = "😶 [ SESSİZLİK ]  "
-
-            # Chunk süresini hesapla (milisaniye cinsinden)
-            current_duration_ms = len(chunk_buffer) * FRAME_DURATION_MS
-            
-            # Dinamik sessizlik limiti belirleme
-            if current_duration_ms > SOFT_CHUNK_DURATION_MS:
-                active_silence_limit = SHORT_SILENCE_LIMIT
-            else:
-                active_silence_limit = SILENCE_LIMIT
-                
-            # Yapay zekaya gönderme şartları:
-            if has_spoken and (silence_counter > active_silence_limit or current_duration_ms >= MAX_CHUNK_DURATION_MS):
-                if len(chunk_buffer) > 0:
-                    audio_queue.put(b''.join(chunk_buffer))
-                chunk_buffer = []
-                silence_counter = 0
-                has_spoken = False
+            if _flush_chunk_if_ready(state, audio_queue):
                 status = "📦 [ YAPAY ZEKAYA İLETİLDİ ]"
 
-            print(f"Durum: {status} | AI: {conf:.2f}       ", end='\r')
+            print(f"Durum: {status} | AI: {confidence:.2f}       ", end="\r")
             if on_status_change:
-                on_status_change(f"{status} (AI: {conf:.2f})")
+                on_status_change(f"{status} (AI: {confidence:.2f})")
 
-    except Exception as e:
-        print(f"\n⚠️ Main Loop Error: {e}")
+    except Exception as exc:
+        logger.exception("Main loop failed")
+        _emit_status(f"\n⚠️ Main Loop Error: {exc}", on_status_change)
     finally:
         if stream:
             stream.stop_stream()
             stream.close()
 
-        msg = "🛑 AI Kapatılıyor, lütfen bekleyin..."
-        print("\n" + msg)
-        if on_status_change: on_status_change(msg)
-        
-        audio_queue.put(None)
-        ai_thread.join()
+        if ai_thread and ai_thread.is_alive():
+            _emit_status("\n🛑 AI kapatılıyor, lütfen bekleyin...", on_status_change)
+            audio_queue.put(STOP_SENTINEL)
+            audio_queue.join()
+            ai_thread.join(timeout=30)
+        elif ai_thread:
+            logger.warning("AI worker was not running during shutdown")
 
-        if frames and SAVE_AUDIO_FILE:
-            msg = "💾 Ana ses dosyası kaydediliyor..."
-            print("\n" + msg)
-            if on_status_change: on_status_change(msg)
-            
-            with wave.open(OUTPUT_FILENAME, 'wb') as wf:
-                wf.setnchannels(channels)
-                wf.setsampwidth(p.get_sample_size(FORMAT))
-                wf.setframerate(rate)
-                wf.writeframes(b''.join(frames))
-                
-            msg = f"✅ Dosya kaydedildi: {os.path.abspath(OUTPUT_FILENAME)}"
-            print(msg)
-            if on_status_change: on_status_change(msg)
+        if channels is not None and rate is not None:
+            sample_width = p.get_sample_size(FORMAT)
+            _save_recording(state.frames, channels, rate, sample_width, on_status_change)
 
         p.terminate()
-        if on_status_change: on_status_change("Hazır.")
+        if on_status_change:
+            on_status_change("Hazır.")

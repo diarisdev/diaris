@@ -1,12 +1,15 @@
-"""
-audio — Ses Donanım Katmanı
-
-Modüller:
-    device : WASAPI loopback cihaz algılama
-    vad    : WebRTC + Silero ikili katman ses algılama
-"""
-
-from .device import auto_detect_device
-from .vad import VADEngine
+"""Audio hardware helpers."""
 
 __all__ = ["auto_detect_device", "VADEngine"]
+
+
+def __getattr__(name):
+    if name == "auto_detect_device":
+        from .device import auto_detect_device
+
+        return auto_detect_device
+    if name == "VADEngine":
+        from .vad import VADEngine
+
+        return VADEngine
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
