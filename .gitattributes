@@ -1,2 +1,6 @@
-# Auto detect text files and perform LF normalization
+# Auto detect text files, normalize line endings, and keep source files UTF-8.
 * text=auto
+*.py text working-tree-encoding=UTF-8
+*.md text working-tree-encoding=UTF-8
+*.txt text working-tree-encoding=UTF-8
+*.example text working-tree-encoding=UTF-8

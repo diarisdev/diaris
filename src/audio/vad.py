@@ -10,6 +10,12 @@ import webrtcvad
 from ..config import VAD_AGGRESSIVENESS, SILERO_THRESHOLD
 
 
+def load_silero_vad():
+    """Load Silero VAD through one mockable boundary."""
+    model, utils = torch.hub.load("snakers4/silero-vad", "silero_vad", trust_repo=True)
+    return model, utils
+
+
 class VADEngine:
     """
     İkili katmanlı ses algılama motoru.
@@ -28,9 +34,7 @@ class VADEngine:
         self.threshold = threshold if threshold is not None else SILERO_THRESHOLD
 
         self.webrtc_vad = webrtcvad.Vad(self.aggressiveness)
-        self.silero_model, _ = torch.hub.load(
-            'snakers4/silero-vad', 'silero_vad', trust_repo=True
-        )
+        self.silero_model, _ = load_silero_vad()
 
     def check_speech(self, data, rate, channels):
         """
