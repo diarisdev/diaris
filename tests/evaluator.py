@@ -17,7 +17,6 @@ Kullanım:
 
 import re
 from dataclasses import dataclass, field
-from typing import Optional
 
 try:
     from pyannote.core import Annotation, Segment

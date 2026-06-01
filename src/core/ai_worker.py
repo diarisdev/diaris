@@ -37,7 +37,6 @@ from ..config import (
     DIARIZATION_EMBEDDING_THRESHOLD, DIARIZATION_WARMUP_MS,
 )
 from ..audio.utils import calculate_chunk_duration_ms
-from .formatting import format_results
 
 logger = logging.getLogger(__name__)
 

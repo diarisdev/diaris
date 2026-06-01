@@ -306,7 +306,6 @@ def run_diarization_benchmark_aiworker(max_minutes=None):
     from src.core.ai_worker import AIWorker
     from src.config import FRAME_DURATION_MS, SILENCE_LIMIT, SHORT_SILENCE_LIMIT, SOFT_CHUNK_DURATION_MS, MAX_CHUNK_DURATION_MS
     import soundfile as sf
-    import numpy as np
     
     vad_engine = VADEngine()
     ai_worker = AIWorker(rate=16000, channels=1)
