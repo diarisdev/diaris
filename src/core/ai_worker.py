@@ -617,7 +617,7 @@ class AIWorker:
             for turn, _, speaker in diarization.itertracks(yield_label=True):
                 turns.append({"start": turn.start, "end": turn.end, "speaker": speaker})
 
-            # --- Embedding çıkar ---
+            # --- Embedding çıkar --
             embeddings_dict = self._extract_speaker_embeddings(waveform_16k, turns) if turns else {}
 
             # --- Warm-up / Aktif faz ---
