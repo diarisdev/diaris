@@ -328,17 +328,22 @@ class AIWorker:
 
             # Embedding modeli: Cross-chunk konuşmacı tanıma için
             embedding_path = os.path.join(LOCAL_MODELS_DIR, "pyannote-embeddings")
-            try:
-                emb_model = Model.from_pretrained(embedding_path)
-                self.embedding_model = Inference(
-                    emb_model,
-                    window="whole",
-                    device=torch.device(DEVICE),
-                )
-                print("✅ [AI Worker] Embedding model loaded (cross-chunk tracking enabled)")
-            except Exception as emb_err:
-                print(f"⚠️ [AI Worker] Embedding model failed: {emb_err}")
+            if not os.path.isdir(embedding_path):
+                print(f"⚠️ [AI Worker] Embedding model not found: {embedding_path}")
+                print("   Modeli indirmek için: python scripts/download_models.py")
                 self.embedding_model = None
+            else:
+                try:
+                    emb_model = Model.from_pretrained(embedding_path)
+                    self.embedding_model = Inference(
+                        emb_model,
+                        window="whole",
+                        device=torch.device(DEVICE),
+                    )
+                    print("✅ [AI Worker] Embedding model loaded (cross-chunk tracking enabled)")
+                except Exception as emb_err:
+                    print(f"⚠️ [AI Worker] Embedding model failed: {emb_err}")
+                    self.embedding_model = None
 
             # Silero VAD: Speech-only embedding extraction için
             try:
