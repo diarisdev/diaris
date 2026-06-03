@@ -276,7 +276,20 @@ class AmiDiarizationManager:
         print("📥 AMI Diarization veri seti hazırlanıyor...")
 
         # AMI-diarization-setup repo yolu
-        repo_rttm_dir = os.path.join(self.data_dir, "AMI-diarization-setup", "only_words", "rttms", "train")
+        setup_repo_dir = os.path.join(self.data_dir, "AMI-diarization-setup")
+        repo_rttm_dir = os.path.join(setup_repo_dir, "only_words", "rttms", "train")
+
+        if not os.path.exists(setup_repo_dir):
+            print("   📥 AMI-diarization-setup reposu klonlanıyor...")
+            import subprocess
+            try:
+                subprocess.run(
+                    ["git", "clone", "https://github.com/BUTSpeechFIT/AMI-diarization-setup.git", setup_repo_dir],
+                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+            except Exception as e:
+                print(f"❌ Repo klonlama hatası: {e}")
+                return False
 
         for meeting in self.meetings:
             wav_path = os.path.join(self.ami_dir, f"{meeting}.Mix-Headset.wav")
