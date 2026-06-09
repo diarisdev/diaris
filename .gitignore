@@ -174,3 +174,6 @@ benchmark_*.csv
 system_recorded.wav
 output/*.wav
 output/results.csv
+
+# Docs
+docs/
