@@ -26,6 +26,7 @@ import numpy as np
 import torch
 import torchaudio
 import soundfile as sf
+import yaml
 from faster_whisper import WhisperModel
 from pyannote.audio import Pipeline, Model, Inference
 
@@ -293,6 +294,59 @@ class AIWorker:
         self.silero_vad = None  # Speech-only embedding için
         self._loaded = False
         self.speaker_tracker = SpeakerTracker()
+        self._runtime_config_path = None  # Geçici config dosyası yolu
+
+    def _prepare_runtime_config(self, config_path):
+        """
+        Diarization config dosyasını okur, model yollarını runtime'da
+        doğru mutlak yollarla günceller ve ASCII-safe bir temp dizine yazar.
+        Pyannote, config'deki 'segmentation' ve 'embedding' alanlarını
+        Model.from_pretrained() ile yükler. Bu fonksiyon yolları HuggingFace
+        repo ID olarak validate eder — Türkçe karakter (ü) ve boşluk
+        içeren Windows yollarında patlar.
+        Çözüm: Yerel model dizin yollarını Windows kısa yol (8.3) formatına
+        çevirerek config'e yaz.
+        """
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+        models_dir = LOCAL_MODELS_DIR
+        params = config.get("pipeline", {}).get("params", {})
+        # Model yollarını güncelle
+        seg_path = os.path.join(models_dir, "pyannote-segmentation")
+        emb_path = os.path.join(models_dir, "pyannote-embeddings")
+        # Windows kısa yol (8.3) formatına çevir — özel karakterlerden kaçın
+        seg_path = self._get_short_path(seg_path)
+        emb_path = self._get_short_path(emb_path)
+        if os.path.isdir(seg_path):
+            params["segmentation"] = seg_path
+            print(f"   Segmentation model: {seg_path}")
+        if os.path.isdir(emb_path):
+            params["embedding"] = emb_path
+            print(f"   Embedding model: {emb_path}")
+        # Geçici dosyaya yaz (ASCII-safe temp dizini)
+        tmp_file = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False, encoding="utf-8"
+        )
+        yaml.dump(config, tmp_file, default_flow_style=False, allow_unicode=True)
+        tmp_file.close()
+        self._runtime_config_path = tmp_file.name
+        print(f"   Runtime config: {tmp_file.name}")
+        return tmp_file.name
+    @staticmethod
+    def _get_short_path(long_path):
+        """
+        Windows 8.3 kısa yol formatına çevir.
+        Özel karakterler (ü, boşluk vb.) içeren yolları ASCII-safe yapar.
+        """
+        try:
+            import ctypes
+            buf = ctypes.create_unicode_buffer(512)
+            result = ctypes.windll.kernel32.GetShortPathNameW(long_path, buf, 512)
+            if result > 0:
+                return buf.value
+        except Exception:
+            pass
+        return long_path
 
     def load_models(self):
         """Modelleri yükler. İlk çağrıda bir kez çalışır."""
@@ -309,8 +363,14 @@ class AIWorker:
             # Diarizer: Yerel config dosyasından yükle
             if os.path.exists(DIARIZATION_CONFIG_PATH):
                 print(f"📂 [AI Worker] Local diarization config: {DIARIZATION_CONFIG_PATH}")
+
+                # Config'deki model yollarını runtime'da doğru mutlak yollarla güncelle.
+                # Türkçe karakter (ü) ve boşluk içeren yollar pyannote'un
+                # HuggingFace repo ID validator'ını kırdığı için config'i
+                # ASCII-safe bir temp dizine yazıyoruz.
+                runtime_config_path = self._prepare_runtime_config(DIARIZATION_CONFIG_PATH)
                 self.diarizer = Pipeline.from_pretrained(
-                    DIARIZATION_CONFIG_PATH,
+                    runtime_config_path,
                 )
             else:
                 if not HF_TOKEN:
@@ -328,6 +388,7 @@ class AIWorker:
 
             # Embedding modeli: Cross-chunk konuşmacı tanıma için
             embedding_path = os.path.join(LOCAL_MODELS_DIR, "pyannote-embeddings")
+            embedding_path = self._get_short_path(embedding_path)
             if not os.path.isdir(embedding_path):
                 print(f"⚠️ [AI Worker] Embedding model not found: {embedding_path}")
                 print("   Modeli indirmek için: python scripts/download_models.py")

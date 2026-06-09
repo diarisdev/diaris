@@ -37,7 +37,18 @@ MODEL_SPECS = [
 
 
 def _has_files(path: Path) -> bool:
-    return path.exists() and any(path.iterdir())
+    """Check if directory contains actual model weight files (not just metadata)."""
+    if not path.exists():
+        return False
+    # Model dosya uzantıları — bunlardan en az biri olmalı
+    model_patterns = ["*.bin", "*.safetensors", "*.ckpt", "*.pt"]
+    for pattern in model_patterns:
+        if list(path.glob(pattern)):
+            return True
+    # Whisper modeli için: model.bin veya config.json yeterli
+    if (path / "config.json").exists():
+        return True
+    return False
 
 
 def download_models(force: bool = False) -> bool:
