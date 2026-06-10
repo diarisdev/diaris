@@ -12,13 +12,12 @@ def format_results(results, return_str=False):
     if not results:
         return "" if return_str else None
 
-    lines = ["-" * 50]
+    lines = []
     for result in results:
         lines.append(
             f"[{result['speaker']}] {result['start']:.1f}s - "
             f"{result['end']:.1f}s: {result['text']}"
         )
-    lines.append("-" * 50)
 
     output = "\n".join(lines)
 

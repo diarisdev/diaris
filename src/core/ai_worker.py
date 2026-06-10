@@ -118,7 +118,7 @@ class SpeakerTracker:
             return
 
         n = len(self._warmup_buffer)
-        print(f"\n🔬 [Warm-up] Clustering {n} embeddings...")
+        print(f"\n[Warm-up] Clustering {n} embeddings...")
 
         if n == 1:
             # Tek embedding varsa direkt konuşmacı oluştur
@@ -126,7 +126,7 @@ class SpeakerTracker:
             self.known_speakers[label] = self._warmup_buffer[0]
             self._warmup_complete = True
             self._warmup_buffer = []
-            print(f"✅ [Warm-up Complete] 1 speaker detected: {label}")
+            print(f"[Warm-up Complete] 1 speaker detected: {label}")
             print(f"   ({self._warmup_audio_ms / 1000:.1f}s audio)\n")
             return
 
@@ -195,7 +195,7 @@ class SpeakerTracker:
         filtered_count = n - total_used
 
         speaker_list = ", ".join(self.known_speakers.keys())
-        print(f"✅ [Warm-up Complete] {len(self.known_speakers)} speaker(s) detected: {speaker_list}")
+        print(f"[Warm-up Complete] {len(self.known_speakers)} speaker(s) detected: {speaker_list}")
         if filtered_count > 0:
             print(f"   (filtered {filtered_count} noisy embedding(s))")
         print(f"   ({self._warmup_audio_ms / 1000:.1f}s audio processed)\n")
@@ -256,7 +256,7 @@ class SpeakerTracker:
                 # Uncertainty Zone: Belirsiz ses. Yeni kişi uydurma, en yakın kişiye ata.
                 # Ancak baseline'ı kirletmemek için GÜNCELLEME YAPMA.
                 mapping[local_label] = best_match
-                print(f"  ⚠️ Uncertain match: mapped to {best_match} (score: {best_score:.3f} < {self.threshold})")
+                print(f"  [Uncertain match] mapped to {best_match} (score: {best_score:.3f} < {self.threshold})")
 
             else:
                 # Yeni konuşmacı tespit edildi
@@ -353,16 +353,16 @@ class AIWorker:
         if self._loaded:
             return True
 
-        print(f"\n🧠 [AI Worker] {DEVICE.upper()} üzerinde başlatılıyor...")
+        print(f"\n[AI Worker] {DEVICE.upper()} üzerinde başlatılıyor...")
         try:
             if not os.path.isdir(WHISPER_PATH):
-                print(f"❌ [AI Worker Error] Whisper modeli bulunamadı: {WHISPER_PATH}")
+                print(f"[AI Worker Error] Whisper modeli bulunamadı: {WHISPER_PATH}")
                 print("   Modelleri indirmek için: python scripts/download_models.py")
                 return False
 
             # Diarizer: Yerel config dosyasından yükle
             if os.path.exists(DIARIZATION_CONFIG_PATH):
-                print(f"📂 [AI Worker] Local diarization config: {DIARIZATION_CONFIG_PATH}")
+                print(f"[AI Worker] Local diarization config: {DIARIZATION_CONFIG_PATH}")
 
                 # Config'deki model yollarını runtime'da doğru mutlak yollarla güncelle.
                 # Türkçe karakter (ü) ve boşluk içeren yollar pyannote'un
@@ -374,10 +374,10 @@ class AIWorker:
                 )
             else:
                 if not HF_TOKEN:
-                    print("❌ [AI Worker Error] HF_TOKEN yok ve yerel diarization config bulunamadı.")
+                    print("[AI Worker Error] HF_TOKEN yok ve yerel diarization config bulunamadı.")
                     print(f"   Beklenen yerel config: {DIARIZATION_CONFIG_PATH}")
                     return False
-                print("⚠️ [AI Worker] Local config not found, loading from HuggingFace...")
+                print("[AI Worker] Local config not found, loading from HuggingFace...")
                 self.diarizer = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
                     token=HF_TOKEN,
@@ -390,7 +390,7 @@ class AIWorker:
             embedding_path = os.path.join(LOCAL_MODELS_DIR, "pyannote-embeddings")
             embedding_path = self._get_short_path(embedding_path)
             if not os.path.isdir(embedding_path):
-                print(f"⚠️ [AI Worker] Embedding model not found: {embedding_path}")
+                print(f"[AI Worker] Embedding model not found: {embedding_path}")
                 print("   Modeli indirmek için: python scripts/download_models.py")
                 self.embedding_model = None
             else:
@@ -401,15 +401,15 @@ class AIWorker:
                         window="whole",
                         device=torch.device(DEVICE),
                     )
-                    print("✅ [AI Worker] Embedding model loaded (cross-chunk tracking enabled)")
+                    print("[AI Worker] Embedding model loaded (cross-chunk tracking enabled)")
                 except Exception as emb_err:
-                    print(f"⚠️ [AI Worker] Embedding model failed: {emb_err}")
+                    print(f"[AI Worker] Embedding model failed: {emb_err}")
                     self.embedding_model = None
 
             # Silero VAD: Speech-only embedding extraction için
             try:
                 self.silero_vad, _ = load_silero_vad()
-                print("✅ [AI Worker] Silero VAD loaded (speech-only embedding enabled)")
+                print("[AI Worker] Silero VAD loaded (speech-only embedding enabled)")
             except Exception as vad_err:
                 logger.warning("Silero VAD could not be loaded: %s", vad_err)
                 self.silero_vad = None
@@ -419,10 +419,10 @@ class AIWorker:
             )
             self._loaded = True
             warmup_sec = DIARIZATION_WARMUP_MS / 1000
-            print(f"✅ [AI Worker] Models loaded. Warm-up: {warmup_sec:.0f}s\n")
+            print(f"[AI Worker] Models loaded. Warm-up: {warmup_sec:.0f}s\n")
             return True
         except Exception as e:
-            print(f"❌ [AI Worker Error] Models failed to load: {e}")
+            print(f"[AI Worker Error] Models failed to load: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -603,7 +603,7 @@ class AIWorker:
                 embeddings_dict[spk] = emb_tensor
 
             except Exception as e:
-                print(f"  ⚠️ [Embedding] {spk}: {e}")
+                print(f"  [Embedding] {spk}: {e}")
 
         return embeddings_dict
 
@@ -717,7 +717,7 @@ class AIWorker:
             }
 
         except Exception as e:
-            print(f"\n⚠️ [Transcription Error]: {e}")
+            print(f"\n[Transcription Error]: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -797,7 +797,7 @@ class AIWorker:
             return results
 
         except Exception as e:
-            print(f"\n⚠️ [Diarization Error]: {e}")
+            print(f"\n[Diarization Error]: {e}")
             import traceback
             traceback.print_exc()
             return transcribed_segments

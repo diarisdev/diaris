@@ -111,7 +111,7 @@ def select_device_interactive(p):
     if not devices:
         return None
 
-    print("\n📋 Kullanılabilir ses giriş cihazları:")
+    print("\n[Kullanılabilir ses giriş cihazları]:")
     print("-" * 60)
     for idx, dev in enumerate(devices):
         print(f"  [{idx}] {dev['name']}")
@@ -120,16 +120,16 @@ def select_device_interactive(p):
 
     while True:
         try:
-            choice = input("\n🎯 Cihaz numarasını seçin (iptal için 'q'): ").strip()
+            choice = input("\n[Seçim] Cihaz numarasını seçin (iptal için 'q'): ").strip()
             if choice.lower() == 'q':
                 return None
             choice_idx = int(choice)
             if 0 <= choice_idx < len(devices):
                 selected = devices[choice_idx]
                 return p.get_device_info_by_index(selected["index"])
-            print(f"⚠️ Lütfen 0-{len(devices)-1} arası bir sayı girin.")
+            print(f"[Hata] Lütfen 0-{len(devices)-1} arası bir sayı girin.")
         except ValueError:
-            print("⚠️ Geçersiz giriş.")
+            print("[Hata] Geçersiz giriş.")
 
 
 def auto_detect_device(p, allow_interactive=True):
@@ -151,12 +151,12 @@ def auto_detect_device(p, allow_interactive=True):
     if loopback:
         channels = max(int(loopback["maxInputChannels"]), 1)
         rate = int(loopback["defaultSampleRate"])
-        print(f"✅ Loopback cihazı bulundu: {loopback['name']}")
+        print(f"[Loopback cihazı bulundu]: {loopback['name']}")
         print(f"   Kanal: {channels} | Hız: {rate} Hz")
         return loopback, channels, rate
 
     # 2. Fallback: Kullanıcıya sor
-    print("⚠️ Otomatik loopback cihazı bulunamadı.")
+    print("[Uyarı] Otomatik loopback cihazı bulunamadı.")
     if not allow_interactive:
         return None
 
@@ -164,7 +164,7 @@ def auto_detect_device(p, allow_interactive=True):
     if selected:
         channels = max(int(selected["maxInputChannels"]), 1)
         rate = int(selected["defaultSampleRate"])
-        print(f"\n✅ Seçilen cihaz: {selected['name']}")
+        print(f"\n[Seçilen cihaz]: {selected['name']}")
         return selected, channels, rate
 
     return None

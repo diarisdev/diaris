@@ -211,7 +211,7 @@ def _update_recording_state(state: RecordingState, data: bytes, is_speech: bool)
         state.chunk_buffer.append(data)
         state.silence_counter = 0
         state.has_spoken = True
-        return "🎙️  [ KONUŞULUYOR ]"
+        return "[ KONUŞULUYOR ]"
 
     silence_bytes = b"\x00" * len(data)
     state.frames.append(silence_bytes)
@@ -219,9 +219,9 @@ def _update_recording_state(state: RecordingState, data: bytes, is_speech: bool)
     if state.has_spoken:
         state.chunk_buffer.append(silence_bytes)
         state.silence_counter += 1
-        return "⏱️  [ BEKLENİYOR ] "
+        return "[ BEKLENİYOR ] "
 
-    return "😶 [ SESSİZLİK ]  "
+    return "[ SESSİZLİK ]  "
 
 
 def _active_silence_limit(chunk_duration_ms: int) -> int:
@@ -254,7 +254,7 @@ def _save_recording(frames, channels, rate, sample_width, on_status_change=None)
         return
 
     ensure_output_dir()
-    _emit_status("\n💾 Ana ses dosyası kaydediliyor...", on_status_change)
+    _emit_status("\nAna ses dosyası kaydediliyor...", on_status_change)
 
     with wave.open(OUTPUT_FILENAME, "wb") as wf:
         wf.setnchannels(channels)
@@ -262,7 +262,7 @@ def _save_recording(frames, channels, rate, sample_width, on_status_change=None)
         wf.setframerate(rate)
         wf.writeframes(b"".join(frames))
 
-    _emit_status(f"✅ Dosya kaydedildi: {os.path.abspath(OUTPUT_FILENAME)}", on_status_change)
+    _emit_status(f"Dosya kaydedildi: {os.path.abspath(OUTPUT_FILENAME)}", on_status_change)
 
 
 def run(stop_event=None, on_status_change=None, on_transcription=None, on_speaker_update=None, allow_interactive_device=False, device_index=None):
@@ -291,12 +291,12 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
             device_info = p.get_device_info_by_index(device_index)
             channels = max(int(device_info["maxInputChannels"]), 1)
             rate = int(device_info["defaultSampleRate"])
-            print(f"✅ Seçilen cihaz: {device_info['name']}")
+            print(f"Seçilen cihaz: {device_info['name']}")
             print(f"   Kanal: {channels} | Hız: {rate} Hz")
         else:
             result = auto_detect_device(p, allow_interactive=allow_interactive_device)
             if result is None:
-                _emit_status("❌ Uygun ses cihazı bulunamadı.", on_status_change)
+                _emit_status("Uygun ses cihazı bulunamadı.", on_status_change)
                 return
 
             device_info, channels, rate = result
@@ -329,9 +329,9 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
             
         is_translation_needed = (source_lang.split("-")[0].lower() != "tr")
         if is_translation_needed:
-            print(f"🌐 [Çeviri Aktif] Kaynak Dil: {source_lang} -> Hedef Dil: {target_lang} | Motor: {engine_name}")
+            print(f"[Çeviri Aktif] Kaynak Dil: {source_lang} -> Hedef Dil: {target_lang} | Motor: {engine_name}")
         else:
-            print(f"🌐 [Çeviri Devre Dışı] Kaynak dil zaten Türkçe ({source_lang}).")
+            print(f"[Çeviri Devre Dışı] Kaynak dil zaten Türkçe ({source_lang}).")
 
         ai_thread = threading.Thread(
             target=_worker_loop,
@@ -356,7 +356,7 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
             frames_per_buffer=frame_size,
         )
 
-        msg = "🔴 CANLI DİNLENİYOR VE ÇEVRİLİYOR..."
+        msg = "CANLI DİNLENİYOR VE ÇEVRİLİYOR..."
         print("\n" + "=" * 40 + "\n" + msg + "\n" + "=" * 40 + "\n")
         if on_status_change:
             on_status_change(msg)
@@ -374,7 +374,7 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
                 })
 
             if _flush_chunk_if_ready(state, audio_queue):
-                status = "📦 [ YAPAY ZEKAYA İLETİLDİ ]"
+                status = "[ YAPAY ZEKAYA İLETİLDİ ]"
 
             print(f"Durum: {status} | AI: {confidence:.2f}       ", end="\r")
             if on_status_change:
@@ -382,14 +382,14 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
 
     except Exception as exc:
         logger.exception("Main loop failed")
-        _emit_status(f"\n⚠️ Main Loop Error: {exc}", on_status_change)
+        _emit_status(f"\nMain Loop Error: {exc}", on_status_change)
     finally:
         if stream:
             stream.stop_stream()
             stream.close()
 
         if ai_thread and ai_thread.is_alive():
-            _emit_status("\n🛑 AI kapatılıyor, lütfen bekleyin...", on_status_change)
+            _emit_status("\nAI kapatılıyor, lütfen bekleyin...", on_status_change)
             audio_queue.put(STOP_SENTINEL)
             audio_queue.join()
             ai_thread.join(timeout=30)

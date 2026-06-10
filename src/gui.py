@@ -51,8 +51,8 @@ class AudioProcessApp(ctk.CTk):
 
         self.refresh_btn = ctk.CTkButton(
             self.device_frame,
-            text="⟳",
-            width=35,
+            text="Yenile",
+            width=55,
             command=self.refresh_devices,
         )
         self.refresh_btn.pack(side="left", padx=(0, 10))
@@ -170,7 +170,7 @@ class AudioProcessApp(ctk.CTk):
             
             # Re-insert headers
             self.textbox.insert("end", "==================================================\n")
-            self.textbox.insert("end", "🔴 CANLI DİNLENİYOR VE ÇEVRİLİYOR...\n")
+            self.textbox.insert("end", "CANLI DİNLENİYOR VE ÇEVRİLİYOR...\n")
             self.textbox.insert("end", "==================================================\n\n")
             
             # If it's a final event, ensure space and insert
@@ -210,7 +210,7 @@ class AudioProcessApp(ctk.CTk):
                 
                 # Re-insert headers
                 self.textbox.insert("end", "==================================================\n")
-                self.textbox.insert("end", "🔴 CANLI DİNLENİYOR VE ÇEVRİLİYOR...\n")
+                self.textbox.insert("end", "CANLI DİNLENİYOR VE ÇEVRİLİYOR...\n")
                 self.textbox.insert("end", "==================================================\n\n")
                 
                 for seg in self.finalized_segments:
@@ -229,7 +229,7 @@ class AudioProcessApp(ctk.CTk):
     def start_recording(self):
         device_index = self._get_selected_device_index()
         if device_index is None:
-            self.on_status_change("❌ Ses cihazı seçilmedi.")
+            self.on_status_change("Ses cihazı seçilmedi.")
             return
 
         self.start_btn.configure(state="disabled")
@@ -241,7 +241,7 @@ class AudioProcessApp(ctk.CTk):
         self.textbox.configure(state="normal")
         self.textbox.delete("1.0", "end")
         self.textbox.insert("end", "==================================================\n")
-        self.textbox.insert("end", "🔴 CANLI DİNLENİYOR VE ÇEVRİLİYOR...\n")
+        self.textbox.insert("end", "CANLI DİNLENİYOR VE ÇEVRİLİYOR...\n")
         self.textbox.insert("end", "==================================================\n\n")
         self.textbox.configure(state="disabled")
         self.textbox.see("end")
