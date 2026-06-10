@@ -20,8 +20,8 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         
         self.setWindowTitle("Audio Process AI")
-        self.resize(760, 760)
-        self.setMinimumSize(680, 640)
+        self.resize(800, 850)
+        self.setMinimumSize(720, 800)
         
         # Sinyal köprüsü
         self.signals = PipelineSignals()
@@ -37,6 +37,71 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_event = threading.Event()
         self.loopback_devices = []
         
+        # Dil Eyaleti ve Çeviriler
+        self.TRANSLATIONS = {
+            "tr": {
+                "title": "Audio Process AI",
+                "subtitle": "Canlı transkripsiyon ve altyazı kontrol paneli",
+                "theme_light": "Aydınlık",
+                "theme_dark": "Karanlık",
+                "audio_source": "Ses kaynağı",
+                "refresh_tooltip": "Cihazları yenile",
+                "start": "Başlat",
+                "stop": "Durdur",
+                "exit": "Çıkış",
+                "subtitle_window": "Altyazı penceresi",
+                "font_size": "Yazı boyutu",
+                "opacity": "Opaklık",
+                "show_overlay": "Altyazı penceresini göster",
+                "click_through": "Tıklamaları arkadaki pencereye geçir",
+                "speaker_coloring": "Konuşmacı renklendirmesi",
+                "audio_translation": "Ses / Çeviri",
+                "ui_language": "Arayüz Dili",
+                "live_log": "Canlı transkripsiyon günlüğü",
+                "tray_show": "Kontrol Panelini Göster",
+                "tray_toggle_overlay": "Altyazı Overlay Aç/Kapat",
+                "tray_quit": "Uygulamadan Çık",
+                "tray_bg_message": "Uygulama arka planda çalışmaya devam ediyor. Açmak için simgeye çift tıklayın.",
+                "tray_recording_message": "Kayıt başladı. Kontrol panelini açmak için tepsideki simgeye çift tıklayın.",
+                "lang_en": "İngilizce",
+                "lang_tr": "Türkçe",
+                "analyzing": "Çözümleniyor...",
+                "live_prefix": "[Canlı] "
+            },
+            "en": {
+                "title": "Audio Process AI",
+                "subtitle": "Live transcription and subtitle control panel",
+                "theme_light": "Light",
+                "theme_dark": "Dark",
+                "audio_source": "Audio source",
+                "refresh_tooltip": "Refresh devices",
+                "start": "Start",
+                "stop": "Stop",
+                "exit": "Exit",
+                "subtitle_window": "Subtitle window",
+                "font_size": "Font size",
+                "opacity": "Opacity",
+                "show_overlay": "Show subtitle window",
+                "click_through": "Pass clicks to background window",
+                "speaker_coloring": "Speaker coloring",
+                "audio_translation": "Audio / Translation",
+                "ui_language": "UI Language",
+                "live_log": "Live transcription log",
+                "tray_show": "Show Control Panel",
+                "tray_toggle_overlay": "Toggle Subtitle Overlay",
+                "tray_quit": "Exit Application",
+                "tray_bg_message": "The application continues to run in the background. Double-click the icon to open.",
+                "tray_recording_message": "Recording started. Double-click the tray icon to open the control panel.",
+                "lang_en": "English",
+                "lang_tr": "Turkish",
+                "analyzing": "Resolving...",
+                "live_prefix": "[Live] "
+            }
+        }
+        
+        system_locale = QtCore.QLocale.system().name()
+        self.ui_lang = "tr" if system_locale.startswith("tr") else "en"
+        
         # Alt bileşenler
         self.overlay = SubtitleOverlay()
         if self.overlay_visible:
@@ -46,6 +111,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # Arayüz ve Stil oluşturma
         self.setup_ui()
+        self.retranslate_ui()
         self.apply_styles()
         
         # Cihazları tara
@@ -70,13 +136,13 @@ class MainWindow(QtWidgets.QMainWindow):
         title_layout.setContentsMargins(0, 0, 0, 0)
         title_layout.setSpacing(3)
 
-        app_title = QtWidgets.QLabel("Audio Process AI", title_box)
-        app_title.setObjectName("AppTitle")
-        app_subtitle = QtWidgets.QLabel("Canlı transkripsiyon ve altyazı kontrol paneli", title_box)
-        app_subtitle.setObjectName("MutedLabel")
+        self.app_title = QtWidgets.QLabel("Audio Process AI", title_box)
+        self.app_title.setObjectName("AppTitle")
+        self.app_subtitle = QtWidgets.QLabel("Canlı transkripsiyon ve altyazı kontrol paneli", title_box)
+        self.app_subtitle.setObjectName("MutedLabel")
 
-        title_layout.addWidget(app_title)
-        title_layout.addWidget(app_subtitle)
+        title_layout.addWidget(self.app_title)
+        title_layout.addWidget(self.app_subtitle)
 
         self.theme_btn = QtWidgets.QPushButton("Aydınlık", self.header)
         self.theme_btn.setObjectName("theme_btn")
@@ -96,8 +162,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.device_layout.setContentsMargins(16, 14, 16, 14)
         self.device_layout.setSpacing(12)
         
-        dev_label = QtWidgets.QLabel("Ses kaynağı", self.device_group)
-        dev_label.setObjectName("SectionHeader")
+        self.dev_label = QtWidgets.QLabel("Ses kaynağı", self.device_group)
+        self.dev_label.setObjectName("SectionHeader")
         
         self.device_combo = QtWidgets.QComboBox(self.device_group)
         self.device_combo.setMinimumHeight(42)
@@ -109,7 +175,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_BrowserReload))
         self.refresh_btn.clicked.connect(self.refresh_devices)
         
-        self.device_layout.addWidget(dev_label)
+        self.device_layout.addWidget(self.dev_label)
         self.device_layout.addWidget(self.device_combo, 1)
         self.device_layout.addWidget(self.refresh_btn)
         
@@ -160,12 +226,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings_layout.setHorizontalSpacing(14)
         self.settings_layout.setVerticalSpacing(12)
         
-        title_settings = QtWidgets.QLabel("Altyazı penceresi", self.settings_group)
-        title_settings.setObjectName("GroupTitle")
-        self.settings_layout.addWidget(title_settings, 0, 0, 1, 3)
+        self.title_settings = QtWidgets.QLabel("Altyazı penceresi", self.settings_group)
+        self.title_settings.setObjectName("GroupTitle")
+        self.settings_layout.addWidget(self.title_settings, 0, 0, 1, 3)
         
         # Yazı Boyutu Ayarı
-        font_label = QtWidgets.QLabel("Yazı boyutu", self.settings_group)
+        self.font_label = QtWidgets.QLabel("Yazı boyutu", self.settings_group)
         self.font_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal, self.settings_group)
         self.font_slider.setRange(8, 32)
         self.font_slider.setValue(self.overlay.font_size)
@@ -174,12 +240,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.font_val_label.setObjectName("ValueLabel")
         self.font_slider.valueChanged.connect(self.on_font_changed)
         
-        self.settings_layout.addWidget(font_label, 1, 0)
+        self.settings_layout.addWidget(self.font_label, 1, 0)
         self.settings_layout.addWidget(self.font_slider, 1, 1)
         self.settings_layout.addWidget(self.font_val_label, 1, 2)
         
         # Şeffaflık Ayarı
-        opacity_label = QtWidgets.QLabel("Opaklık", self.settings_group)
+        self.opacity_label = QtWidgets.QLabel("Opaklık", self.settings_group)
         self.opacity_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal, self.settings_group)
         self.opacity_slider.setRange(20, 100)
         self.opacity_slider.setValue(int(self.overlay.opacity * 100))
@@ -187,19 +253,56 @@ class MainWindow(QtWidgets.QMainWindow):
         self.opacity_val_label.setObjectName("ValueLabel")
         self.opacity_slider.valueChanged.connect(self.on_opacity_changed)
         
-        self.settings_layout.addWidget(opacity_label, 2, 0)
+        self.settings_layout.addWidget(self.opacity_label, 2, 0)
         self.settings_layout.addWidget(self.opacity_slider, 2, 1)
         self.settings_layout.addWidget(self.opacity_val_label, 2, 2)
         
         # Dil Seçimi Ayarı
-        lang_label = QtWidgets.QLabel("Dil / Çeviri", self.settings_group)
-        self.lang_combo = QtWidgets.QComboBox(self.settings_group)
-        self.lang_combo.addItem("İngilizce ➔ Türkçe (Çeviri)", "en-tr")
-        self.lang_combo.addItem("İngilizce ➔ İngilizce (Ham)", "en-en")
-        self.lang_combo.setMinimumHeight(36)
+        self.lang_label = QtWidgets.QLabel("Dil / Çeviri", self.settings_group)
         
-        self.settings_layout.addWidget(lang_label, 3, 0)
-        self.settings_layout.addWidget(self.lang_combo, 3, 1, 1, 2)
+        # Container for side-by-side comboboxes
+        self.lang_container = QtWidgets.QWidget(self.settings_group)
+        self.lang_container_layout = QtWidgets.QHBoxLayout(self.lang_container)
+        self.lang_container_layout.setContentsMargins(0, 0, 0, 0)
+        self.lang_container_layout.setSpacing(8)
+        
+        self.source_lang_combo = QtWidgets.QComboBox(self.lang_container)
+        self.source_lang_combo.addItem("İngilizce", "en")
+        self.source_lang_combo.addItem("Türkçe", "tr")
+        self.source_lang_combo.setMinimumHeight(36)
+        
+        arrow_label = QtWidgets.QLabel("➔", self.lang_container)
+        arrow_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #9aa6b2;")
+        arrow_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        
+        self.target_lang_combo = QtWidgets.QComboBox(self.lang_container)
+        self.target_lang_combo.addItem("Türkçe", "tr")
+        self.target_lang_combo.addItem("İngilizce", "en")
+        self.target_lang_combo.setMinimumHeight(36)
+        
+        self.lang_container_layout.addWidget(self.source_lang_combo, 1)
+        self.lang_container_layout.addWidget(arrow_label)
+        self.lang_container_layout.addWidget(self.target_lang_combo, 1)
+        
+        self.settings_layout.addWidget(self.lang_label, 3, 0)
+        self.settings_layout.addWidget(self.lang_container, 3, 1, 1, 2)
+
+        # Arayüz Dili Ayarı (UI Language)
+        self.ui_lang_label = QtWidgets.QLabel("Arayüz Dili", self.settings_group)
+        self.ui_lang_combo = QtWidgets.QComboBox(self.settings_group)
+        self.ui_lang_combo.addItem("Türkçe", "tr")
+        self.ui_lang_combo.addItem("English", "en")
+        self.ui_lang_combo.setMinimumHeight(36)
+        
+        # Set default selection
+        idx = self.ui_lang_combo.findData(self.ui_lang)
+        if idx >= 0:
+            self.ui_lang_combo.setCurrentIndex(idx)
+            
+        self.ui_lang_combo.currentIndexChanged.connect(self.on_ui_lang_changed)
+        
+        self.settings_layout.addWidget(self.ui_lang_label, 4, 0)
+        self.settings_layout.addWidget(self.ui_lang_combo, 4, 1, 1, 2)
         
         # Checkbox Kontrolleri
         self.show_overlay_cb = QtWidgets.QCheckBox("Altyazı penceresini göster", self.settings_group)
@@ -215,9 +318,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.speaker_color_cb.setToolTip("Altyazı metnini konuşmacı rengine boyar")
         self.speaker_color_cb.toggled.connect(self.overlay.set_speaker_coloring)
         
-        self.settings_layout.addWidget(self.show_overlay_cb, 4, 0, 1, 3)
-        self.settings_layout.addWidget(self.click_through_cb, 5, 0, 1, 3)
-        self.settings_layout.addWidget(self.speaker_color_cb, 6, 0, 1, 3)
+        self.settings_layout.addWidget(self.show_overlay_cb, 5, 0, 1, 3)
+        self.settings_layout.addWidget(self.click_through_cb, 6, 0, 1, 3)
+        self.settings_layout.addWidget(self.speaker_color_cb, 7, 0, 1, 3)
         
         self.layout.addWidget(self.settings_group)
         
@@ -228,14 +331,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_layout.setContentsMargins(18, 18, 18, 18)
         self.log_layout.setSpacing(12)
         
-        log_title = QtWidgets.QLabel("Canlı transkripsiyon günlüğü", self.log_group)
-        log_title.setObjectName("GroupTitle")
+        self.log_title = QtWidgets.QLabel("Canlı transkripsiyon günlüğü", self.log_group)
+        self.log_title.setObjectName("GroupTitle")
         
         self.log_text = QtWidgets.QTextEdit(self.log_group)
         self.log_text.setReadOnly(True)
         self.log_text.setFont(QtGui.QFont("Consolas", 11))
         
-        self.log_layout.addWidget(log_title)
+        self.log_layout.addWidget(self.log_title)
         self.log_layout.addWidget(self.log_text)
         
         self.layout.addWidget(self.log_group, 1)
@@ -620,10 +723,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.is_dark_theme = not self.is_dark_theme
         if self.is_dark_theme:
             self.setStyleSheet(self.DARK_STYLESHEET)
-            self.theme_btn.setText("Aydınlık")
+            self.theme_btn.setText(self.TRANSLATIONS[self.ui_lang]["theme_light"])
         else:
             self.setStyleSheet(self.LIGHT_STYLESHEET)
-            self.theme_btn.setText("Karanlık")
+            self.theme_btn.setText(self.TRANSLATIONS[self.ui_lang]["theme_dark"])
 
     # ------------------------------------------------------------------ #
     #  Cihaz yönetimi                                                     #
@@ -683,12 +786,97 @@ class MainWindow(QtWidgets.QMainWindow):
     #  Thread-Safe Callback Köprüleri                                     #
     # ------------------------------------------------------------------ #
 
+    def translate_status(self, text, lang):
+        text_lower = text.lower()
+        if "hazır" in text_lower or "ready" in text_lower:
+            return "Sistem Hazır." if lang == "tr" else "System Ready."
+        if "geçersiz" in text_lower or "invalid" in text_lower:
+            return "Seçili cihaz geçersiz." if lang == "tr" else "Selected device is invalid."
+        if "durduruldu (zaman aşımı)" in text_lower or "stopped (timeout)" in text_lower:
+            return "Durduruldu (zaman aşımı)." if lang == "tr" else "Stopped (timeout)."
+        if "durduruldu" in text_lower or "stopped" in text_lower:
+            return "Durduruldu." if lang == "tr" else "Stopped."
+        if "kapatılıyor" in text_lower or "shutting down" in text_lower or "ai kapatılıyor" in text_lower:
+            import re
+            m = re.search(r"\((.*?)\)", text)
+            suffix = f" ({m.group(1)})" if m else ""
+            if "sistem" in text_lower or "system" in text_lower:
+                return f"Sistem kapatılıyor...{suffix}" if lang == "tr" else f"Shutting down system...{suffix}"
+            if "zaman aşımı" in text_lower or "timeout" in text_lower:
+                return "Zaman aşımı! Zorla kapatılıyor..." if lang == "tr" else "Timeout! Force shutting down..."
+            return f"Yapay zeka kapatılıyor...{suffix}" if lang == "tr" else f"Shutting down AI...{suffix}"
+        if "canlı" in text_lower or "listening" in text_lower:
+            return "CANLI DİNLENİYOR VE ÇEVRİLİYOR..." if lang == "tr" else "LISTENING AND TRANSLATING LIVE..."
+        return text
+
+    def on_ui_lang_changed(self, index):
+        self.ui_lang = self.ui_lang_combo.itemData(index)
+        
+        # Automatically update translation target based on UI language
+        new_target_lang = self.ui_lang
+        idx = self.target_lang_combo.findData(new_target_lang)
+        if idx >= 0:
+            self.target_lang_combo.setCurrentIndex(idx)
+            
+        self.retranslate_ui()
+
+    def retranslate_ui(self):
+        lang = self.ui_lang
+        trans = self.TRANSLATIONS[lang]
+        
+        self.app_title.setText(trans["title"])
+        self.app_subtitle.setText(trans["subtitle"])
+        
+        if self.is_dark_theme:
+            self.theme_btn.setText(trans["theme_light"])
+        else:
+            self.theme_btn.setText(trans["theme_dark"])
+            
+        self.dev_label.setText(trans["audio_source"])
+        self.refresh_btn.setToolTip(trans["refresh_tooltip"])
+        
+        self.start_btn.setText(trans["start"])
+        self.stop_btn.setText(trans["stop"])
+        self.exit_btn.setText(trans["exit"])
+        
+        self.title_settings.setText(trans["subtitle_window"])
+        self.font_label.setText(trans["font_size"])
+        self.opacity_label.setText(trans["opacity"])
+        self.lang_label.setText(trans["audio_translation"])
+        self.ui_lang_label.setText(trans["ui_language"])
+        
+        self.source_lang_combo.setItemText(0, trans["lang_en"])
+        self.source_lang_combo.setItemText(1, trans["lang_tr"])
+        
+        self.target_lang_combo.setItemText(0, trans["lang_tr"])
+        self.target_lang_combo.setItemText(1, trans["lang_en"])
+        
+        self.show_overlay_cb.setText(trans["show_overlay"])
+        self.click_through_cb.setText(trans["click_through"])
+        self.speaker_color_cb.setText(trans["speaker_coloring"])
+        
+        self.log_title.setText(trans["live_log"])
+        
+        # Translate status
+        self.safe_on_status_change(self.status_label.text())
+        
+        # Retranslate system tray actions
+        if hasattr(self, 'tray') and hasattr(self.tray, 'show_action'):
+            self.tray.show_action.setText(trans["tray_show"])
+            self.tray.toggle_overlay_action.setText(trans["tray_toggle_overlay"])
+            self.tray.quit_action.setText(trans["tray_quit"])
+
+        # Update overlay window language
+        if hasattr(self, 'overlay'):
+            self.overlay.set_language(lang)
+
     def safe_on_status_change(self, text):
-        self.status_label.setText(text)
-        lower_text = text.lower()
-        if "canl" in lower_text and "nlen" in lower_text:
+        translated_text = self.translate_status(text, self.ui_lang)
+        self.status_label.setText(translated_text)
+        lower_text = translated_text.lower()
+        if "canl" in lower_text or "listen" in lower_text:
             status = "live"
-        elif any(keyword in lower_text for keyword in ("geçersiz", "gecersiz", "hata", "bulunamadı", "bulunamadi")):
+        elif any(keyword in lower_text for keyword in ("geçersiz", "gecersiz", "hata", "bulunamadı", "bulunamadi", "invalid", "error", "not found")):
             status = "error"
         else:
             status = "ready"
@@ -715,15 +903,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_text.clear()
         for seg in self.finalized_segments:
             if seg:
-                self.log_text.append(seg + "\n")
+                seg_translated = seg.replace("Çözümleniyor...", self.TRANSLATIONS[self.ui_lang]["analyzing"])
+                self.log_text.append(seg_translated + "\n")
         if partial:
-            self.log_text.append(f"[Canlı] {partial}")
+            self.log_text.append(f"{self.TRANSLATIONS[self.ui_lang]['live_prefix']}{partial}")
             
         # Kaydır
         self.log_text.ensureCursorVisible()
         
         # Altyazıyı güncelle
-        self.overlay.update_subtitles(self.finalized_segments, partial)
+        finalized_translated = [
+            seg.replace("Çözümleniyor...", self.TRANSLATIONS[self.ui_lang]["analyzing"]) if seg else ""
+            for seg in self.finalized_segments
+        ]
+        self.overlay.update_subtitles(finalized_translated, partial)
 
     def safe_on_speaker_update(self, event):
         segment_index = event["segment_index"]
@@ -736,12 +929,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log_text.clear()
             for seg in self.finalized_segments:
                 if seg:
-                    self.log_text.append(seg + "\n")
+                    seg_translated = seg.replace("Çözümleniyor...", self.TRANSLATIONS[self.ui_lang]["analyzing"])
+                    self.log_text.append(seg_translated + "\n")
             
             self.log_text.ensureCursorVisible()
             
             # Altyazıyı güncelle
-            self.overlay.update_subtitles(self.finalized_segments, "")
+            finalized_translated = [
+                seg.replace("Çözümleniyor...", self.TRANSLATIONS[self.ui_lang]["analyzing"]) if seg else ""
+                for seg in self.finalized_segments
+            ]
+            self.overlay.update_subtitles(finalized_translated, "")
 
     # ------------------------------------------------------------------ #
     #  Kayıt Kontrolleri                                                  #
@@ -757,7 +955,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_btn.setEnabled(True)
         self.device_combo.setEnabled(False)
         self.refresh_btn.setEnabled(False)
-        self.lang_combo.setEnabled(False)
         
         self.finalized_segments = []
         self.log_text.clear()
@@ -773,8 +970,10 @@ class MainWindow(QtWidgets.QMainWindow):
         def speaker_cb(event):
             self.signals.speaker_updated.emit(event)
             
-        lang_pair = self.lang_combo.currentData() or "en-tr"
-        source_lang, target_lang = lang_pair.split("-")
+        def get_lang_pair():
+            source_lang = self.source_lang_combo.currentData() or "en"
+            target_lang = self.target_lang_combo.currentData() or "tr"
+            return source_lang, target_lang
             
         self.pipeline_thread = threading.Thread(
             target=run,
@@ -784,8 +983,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "on_transcription": trans_cb,
                 "on_speaker_update": speaker_cb,
                 "device_index": device_idx,
-                "source_lang": source_lang,
-                "target_lang": target_lang,
+                "get_lang_pair": get_lang_pair,
             },
             daemon=True
         )
@@ -801,7 +999,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Kullanıcıya tepside bilgilendirme mesajı göster
         self.tray.tray.showMessage(
             "Audio Process AI",
-            "Kayıt başladı. Kontrol panelini açmak için tepsideki simgeye çift tıklayın.",
+            self.TRANSLATIONS[self.ui_lang]["tray_recording_message"],
             QtWidgets.QSystemTrayIcon.MessageIcon.Information,
             3000
         )
@@ -827,13 +1025,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.start_btn.setEnabled(True)
                 self.device_combo.setEnabled(True)
                 self.refresh_btn.setEnabled(True)
-                self.lang_combo.setEnabled(True)
+                self.source_lang_combo.setEnabled(True)
+                self.target_lang_combo.setEnabled(True)
+                self.ui_lang_combo.setEnabled(True)
                 self.safe_on_status_change("Durduruldu (zaman aşımı).")
         else:
             self.start_btn.setEnabled(True)
             self.device_combo.setEnabled(True)
             self.refresh_btn.setEnabled(True)
-            self.lang_combo.setEnabled(True)
+            self.source_lang_combo.setEnabled(True)
+            self.target_lang_combo.setEnabled(True)
+            self.ui_lang_combo.setEnabled(True)
             self.safe_on_status_change("Durduruldu.")
 
     def show_and_raise(self):
@@ -847,7 +1049,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_btn.setEnabled(False)
         self.device_combo.setEnabled(False)
         self.refresh_btn.setEnabled(False)
-        self.lang_combo.setEnabled(False)
+        self.source_lang_combo.setEnabled(False)
+        self.target_lang_combo.setEnabled(False)
+        self.ui_lang_combo.setEnabled(False)
         self.exit_btn.setEnabled(False)
         
         # Eğer kayıt devam ediyorsa durdur ve beklemeye başla
@@ -887,7 +1091,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hide()
         self.tray.tray.showMessage(
             "Audio Process AI",
-            "Uygulama arka planda çalışmaya devam ediyor. Açmak için simgeye çift tıklayın.",
+            self.TRANSLATIONS[self.ui_lang]["tray_bg_message"],
             QtWidgets.QSystemTrayIcon.MessageIcon.Information,
             3000
         )

@@ -7,7 +7,10 @@ class ResizeGrip(QtWidgets.QSizeGrip):
         super().__init__(parent)
         self.setFixedSize(28, 28)
         self.setCursor(QtCore.Qt.CursorShape.SizeFDiagCursor)
-        self.setToolTip("Sağ alt köşeden boyutlandır")
+        if parent and hasattr(parent, 'TRANSLATIONS'):
+            self.setToolTip(parent.TRANSLATIONS[parent.ui_lang]["resize_tooltip"])
+        else:
+            self.setToolTip("Sağ alt köşeden boyutlandır")
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -25,15 +28,6 @@ class SubtitleOverlay(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         
-        # Pençe başlığı ve temel nitelikler
-        self.setWindowTitle("Altyazı Overlay")
-        self.setWindowFlags(
-            QtCore.Qt.WindowType.FramelessWindowHint | 
-            QtCore.Qt.WindowType.WindowStaysOnTopHint | 
-            QtCore.Qt.WindowType.Tool
-        )
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
-        
         # Sürükleme (Drag) koordinatları
         self.drag_position = QtCore.QPoint()
         
@@ -42,6 +36,32 @@ class SubtitleOverlay(QtWidgets.QWidget):
         self.opacity = 0.8
         self.click_through = False
         self.speaker_coloring = True
+        
+        # Çeviriler
+        self.TRANSLATIONS = {
+            "tr": {
+                "window_title": "Altyazı Overlay",
+                "live": "[Canlı]:",
+                "listening": "Ses dinleniyor, altyazılar burada görünecek...",
+                "resize_tooltip": "Sağ alt köşeden boyutlandır"
+            },
+            "en": {
+                "window_title": "Subtitle Overlay",
+                "live": "[Live]:",
+                "listening": "Listening to audio, subtitles will appear here...",
+                "resize_tooltip": "Resize from bottom-right"
+            }
+        }
+        self.ui_lang = "tr"
+        
+        # Pençe başlığı ve temel nitelikler
+        self.setWindowTitle(self.TRANSLATIONS[self.ui_lang]["window_title"])
+        self.setWindowFlags(
+            QtCore.Qt.WindowType.FramelessWindowHint | 
+            QtCore.Qt.WindowType.WindowStaysOnTopHint | 
+            QtCore.Qt.WindowType.Tool
+        )
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
         
         # Resizing states
         self.is_resizing = False
@@ -134,6 +154,14 @@ class SubtitleOverlay(QtWidgets.QWidget):
         self.speaker_coloring = enabled
         self.render_subtitles()
 
+    def set_language(self, lang):
+        if lang in self.TRANSLATIONS:
+            self.ui_lang = lang
+            self.setWindowTitle(self.TRANSLATIONS[lang]["window_title"])
+            if hasattr(self, 'resize_grip'):
+                self.resize_grip.setToolTip(self.TRANSLATIONS[lang]["resize_tooltip"])
+            self.render_subtitles()
+
     def update_subtitles(self, finalized_segments, partial_text):
         """Yeni altyazıları kabul eder ve arayüzde gösterir."""
         # Son 2 kesinleşmiş segmenti gösterelim
@@ -216,7 +244,7 @@ class SubtitleOverlay(QtWidgets.QWidget):
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(10)
             
-            spk_label = QtWidgets.QLabel("[Canlı]:", row)
+            spk_label = QtWidgets.QLabel(self.TRANSLATIONS[self.ui_lang]["live"], row)
             spk_label.setFont(QtGui.QFont("Segoe UI", self.font_size - 2, QtGui.QFont.Weight.Bold))
             spk_label.setStyleSheet("color: #aaaaaa; background: transparent; border: none;")
             spk_label.setMinimumWidth(92)
@@ -233,7 +261,7 @@ class SubtitleOverlay(QtWidgets.QWidget):
             
         # Eğer içerik tamamen boşsa bilgilendirme göster
         if not self.segments and not self.partial_text:
-            info_label = QtWidgets.QLabel("Ses dinleniyor, altyazılar burada görünecek...", self.sub_area)
+            info_label = QtWidgets.QLabel(self.TRANSLATIONS[self.ui_lang]["listening"], self.sub_area)
             info_label.setFont(QtGui.QFont("Segoe UI", self.font_size - 2, QtGui.QFont.Weight.Light))
             info_label.setStyleSheet("color: #888888; background: transparent; border: none;")
             info_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
