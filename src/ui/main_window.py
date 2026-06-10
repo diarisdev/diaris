@@ -191,6 +191,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings_layout.addWidget(self.opacity_slider, 2, 1)
         self.settings_layout.addWidget(self.opacity_val_label, 2, 2)
         
+        # Dil Seçimi Ayarı
+        lang_label = QtWidgets.QLabel("Dil / Çeviri", self.settings_group)
+        self.lang_combo = QtWidgets.QComboBox(self.settings_group)
+        self.lang_combo.addItem("İngilizce ➔ Türkçe (Çeviri)", "en-tr")
+        self.lang_combo.addItem("İngilizce ➔ İngilizce (Ham)", "en-en")
+        self.lang_combo.setMinimumHeight(36)
+        
+        self.settings_layout.addWidget(lang_label, 3, 0)
+        self.settings_layout.addWidget(self.lang_combo, 3, 1, 1, 2)
+        
         # Checkbox Kontrolleri
         self.show_overlay_cb = QtWidgets.QCheckBox("Altyazı penceresini göster", self.settings_group)
         self.show_overlay_cb.setChecked(self.overlay_visible)
@@ -205,9 +215,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.speaker_color_cb.setToolTip("Altyazı metnini konuşmacı rengine boyar")
         self.speaker_color_cb.toggled.connect(self.overlay.set_speaker_coloring)
         
-        self.settings_layout.addWidget(self.show_overlay_cb, 3, 0, 1, 3)
-        self.settings_layout.addWidget(self.click_through_cb, 4, 0, 1, 3)
-        self.settings_layout.addWidget(self.speaker_color_cb, 5, 0, 1, 3)
+        self.settings_layout.addWidget(self.show_overlay_cb, 4, 0, 1, 3)
+        self.settings_layout.addWidget(self.click_through_cb, 5, 0, 1, 3)
+        self.settings_layout.addWidget(self.speaker_color_cb, 6, 0, 1, 3)
         
         self.layout.addWidget(self.settings_group)
         
@@ -747,6 +757,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_btn.setEnabled(True)
         self.device_combo.setEnabled(False)
         self.refresh_btn.setEnabled(False)
+        self.lang_combo.setEnabled(False)
         
         self.finalized_segments = []
         self.log_text.clear()
@@ -762,6 +773,9 @@ class MainWindow(QtWidgets.QMainWindow):
         def speaker_cb(event):
             self.signals.speaker_updated.emit(event)
             
+        lang_pair = self.lang_combo.currentData() or "en-tr"
+        source_lang, target_lang = lang_pair.split("-")
+            
         self.pipeline_thread = threading.Thread(
             target=run,
             kwargs={
@@ -770,6 +784,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "on_transcription": trans_cb,
                 "on_speaker_update": speaker_cb,
                 "device_index": device_idx,
+                "source_lang": source_lang,
+                "target_lang": target_lang,
             },
             daemon=True
         )
@@ -807,11 +823,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.start_btn.setEnabled(True)
                 self.device_combo.setEnabled(True)
                 self.refresh_btn.setEnabled(True)
+                self.lang_combo.setEnabled(True)
                 self.safe_on_status_change("Durduruldu (zaman aşımı).")
         else:
             self.start_btn.setEnabled(True)
             self.device_combo.setEnabled(True)
             self.refresh_btn.setEnabled(True)
+            self.lang_combo.setEnabled(True)
             self.safe_on_status_change("Durduruldu.")
 
     def show_and_raise(self):

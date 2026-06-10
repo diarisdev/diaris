@@ -736,13 +736,14 @@ class AIWorker:
 
         return smoothed
 
-    def process_chunk(self, chunk_bytes, is_final=True):
+    def process_chunk(self, chunk_bytes, is_final=True, language=None):
         """
         Bir ses parçasını işler: transkripsiyon yapar.
 
         Args:
             chunk_bytes: Ham ses verisi (bytes, int16)
             is_final: Eğer False ise sadece hızlı transkripsiyon yapılır (diarization pas geçilir)
+            language: Transkripsiyon için dil kodu (örn. 'en', 'tr'). Belirtilmezse varsayılan WHISPER_LANGUAGE kullanılır.
 
         Returns:
             dict: Sonuçları ve diarization için gerekli waveform bilgilerini içeren dict.
@@ -771,7 +772,7 @@ class AIWorker:
                     audio_np_16k,
                     beam_size=1,
                     condition_on_previous_text=False,
-                    language=WHISPER_LANGUAGE,
+                    language=language or WHISPER_LANGUAGE,
                 )
                 segments = list(segments)
                 if len(segments) == 0:
@@ -793,7 +794,7 @@ class AIWorker:
                 audio_np_16k,
                 beam_size=3,
                 word_timestamps=True,
-                language=WHISPER_LANGUAGE,
+                language=language or WHISPER_LANGUAGE,
             )
             segments = list(segments)
 
