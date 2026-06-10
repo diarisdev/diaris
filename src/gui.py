@@ -99,6 +99,7 @@ class AudioProcessApp(ctk.CTk):
         # Arka plan thread değişkenleri
         self.pipeline_thread = None
         self.stop_event = threading.Event()
+        self.finalized_segments = []
 
         # Cihaz listesi
         self.loopback_devices = []
@@ -159,11 +160,35 @@ class AudioProcessApp(ctk.CTk):
         # UI güncellemeleri ana thread'de yapılmalı
         self.after(0, lambda: self.status_label.configure(text=status_text))
 
-    def on_transcription(self, text):
-        def append_text():
-            self.textbox.insert("end", text + "\n\n")
+    def on_transcription(self, event):
+        if not isinstance(event, dict):
+            event = {"type": "final", "text": str(event)}
+
+        def update_ui():
+            self.textbox.configure(state="normal")
+            self.textbox.delete("1.0", "end")
+            
+            # Re-insert headers
+            self.textbox.insert("end", "==================================================\n")
+            self.textbox.insert("end", "🔴 CANLI DİNLENİYOR VE ÇEVRİLİYOR...\n")
+            self.textbox.insert("end", "==================================================\n\n")
+            
+            # Re-insert finalized segments
+            for seg in self.finalized_segments:
+                self.textbox.insert("end", seg + "\n\n")
+                
+            # If it's a final event, append it to finalized list and insert it
+            if event["type"] == "final":
+                self.finalized_segments.append(event["text"])
+                self.textbox.insert("end", event["text"] + "\n\n")
+            else:
+                # If it's a partial event, show it at the end
+                self.textbox.insert("end", f"[Canlı] {event['text']}\n")
+                
+            self.textbox.configure(state="disabled")
             self.textbox.see("end")
-        self.after(0, append_text)
+
+        self.after(0, update_ui)
 
     # ------------------------------------------------------------------ #
     #  Kayıt kontrolleri                                                  #
@@ -180,9 +205,13 @@ class AudioProcessApp(ctk.CTk):
         self.device_combo.configure(state="disabled")
         self.refresh_btn.configure(state="disabled")
 
+        self.finalized_segments = []
+        self.textbox.configure(state="normal")
+        self.textbox.delete("1.0", "end")
         self.textbox.insert("end", "==================================================\n")
         self.textbox.insert("end", "🔴 CANLI DİNLENİYOR VE ÇEVRİLİYOR...\n")
         self.textbox.insert("end", "==================================================\n\n")
+        self.textbox.configure(state="disabled")
         self.textbox.see("end")
 
         self.stop_event.clear()

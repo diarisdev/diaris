@@ -63,19 +63,55 @@ def _worker_loop(audio_queue, ai_worker, on_transcription=None):
         return
 
     while True:
-        chunk_bytes = audio_queue.get()
+        task = audio_queue.get()
         try:
-            if chunk_bytes is STOP_SENTINEL:
+            if task is STOP_SENTINEL:
                 return
 
-            results = ai_worker.process_chunk(chunk_bytes)
-            formatted_str = format_results(results, return_str=True)
+            task_type = task.get("type", "final")
+            chunk_bytes = task.get("data", b"")
+
+            # Coalesce partial tasks to reduce latency
+            if task_type == "partial":
+                try:
+                    while True:
+                        next_task = audio_queue.get_nowait()
+                        if next_task is STOP_SENTINEL:
+                            audio_queue.put(next_task)
+                            break
+                        if next_task.get("type") == "partial":
+                            audio_queue.task_done()
+                            task = next_task
+                            chunk_bytes = task.get("data", b"")
+                        else:
+                            # A final task is waiting! Skip this partial and process the final task
+                            audio_queue.task_done()
+                            task = next_task
+                            task_type = task.get("type", "final")
+                            chunk_bytes = task.get("data", b"")
+                            break
+                except queue.Empty:
+                    pass
+
+            is_final = (task_type == "final")
+            results = ai_worker.process_chunk(chunk_bytes, is_final=is_final)
+
+            if is_final:
+                formatted_str = format_results(results, return_str=True)
+            else:
+                if results:
+                    formatted_str = " ".join(r["text"] for r in results).strip()
+                else:
+                    formatted_str = ""
 
             if formatted_str:
                 if on_transcription:
-                    on_transcription(formatted_str)
+                    on_transcription({"type": task_type, "text": formatted_str})
                 else:
-                    print("\n" + formatted_str + "\n")
+                    if is_final:
+                        print("\n" + formatted_str + "\n")
+                    else:
+                        print(f"\r\033[K[Canlı] {formatted_str}", end="", flush=True)
         except Exception:
             logger.exception("AI worker failed while processing a chunk")
         finally:
@@ -126,7 +162,10 @@ def _flush_chunk_if_ready(state: RecordingState, audio_queue) -> bool:
         return False
 
     if state.chunk_buffer:
-        audio_queue.put(b"".join(state.chunk_buffer))
+        audio_queue.put({
+            "type": "final",
+            "data": b"".join(state.chunk_buffer)
+        })
     state.reset_chunk()
     return True
 
@@ -210,6 +249,13 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, allow_int
             data = stream.read(frame_size, exception_on_overflow=False)
             is_speech, confidence = vad_engine.check_speech(data, rate, channels)
             status = _update_recording_state(state, data, is_speech)
+
+            # Send partial update if speech is active and we've gathered enough frames (every ~300ms)
+            if state.has_spoken and len(state.chunk_buffer) > 0 and len(state.chunk_buffer) % 10 == 0:
+                audio_queue.put({
+                    "type": "partial",
+                    "data": b"".join(state.chunk_buffer)
+                })
 
             if _flush_chunk_if_ready(state, audio_queue):
                 status = "📦 [ YAPAY ZEKAYA İLETİLDİ ]"

@@ -636,7 +636,7 @@ class AIWorker:
 
         return smoothed
 
-    def process_chunk(self, chunk_bytes):
+    def process_chunk(self, chunk_bytes, is_final=True):
         """
         Bir ses parçasını işler: transkripsiyon + konuşmacı ayrıştırma.
 
@@ -645,6 +645,7 @@ class AIWorker:
 
         Args:
             chunk_bytes: Ham ses verisi (bytes, int16)
+            is_final: Eğer False ise sadece hızlı transkripsiyon yapılır (diarization pas geçilir)
 
         Returns:
             list[dict] veya None: Her segment için {speaker, start, end, text}.
@@ -661,18 +662,36 @@ class AIWorker:
 
         chunk_duration_ms = self._get_chunk_duration_ms(chunk_bytes)
 
-        tmp_path = None
         try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
-                sf.write(tmp_file.name, audio_np_int16, self.rate)
-                tmp_path = tmp_file.name
-
-            # --- Pyannote için ses hazırla ---
+            # --- Pyannote/Whisper için ses hazırla ---
             mono_float32 = self._to_mono_float32(audio_np_int16)
             waveform_16k, sample_rate = self._resample_for_pyannote(mono_float32)
-            pyannote_input = {"waveform": waveform_16k, "sample_rate": sample_rate}
+            audio_np_16k = waveform_16k.squeeze(0).numpy()
 
-            # --- Diarization ---
+            if not is_final:
+                # Hızlı Kısmi Transkripsiyon (No Diarization, No Disk write)
+                segments, _ = self.transcriber.transcribe(
+                    audio_np_16k,
+                    beam_size=1,
+                    condition_on_previous_text=False,
+                    language=WHISPER_LANGUAGE,
+                )
+                segments = list(segments)
+                if len(segments) == 0:
+                    return None
+
+                results = []
+                for segment in segments:
+                    results.append({
+                        "speaker": "Kısmi",
+                        "start": segment.start,
+                        "end": segment.end,
+                        "text": segment.text,
+                    })
+                return results
+
+            # --- Diarization (Sadece final chunk'lar için) ---
+            pyannote_input = {"waveform": waveform_16k, "sample_rate": sample_rate}
             pipeline_output = self.diarizer(pyannote_input)
             if hasattr(pipeline_output, "speaker_diarization"):
                 diarization = pipeline_output.speaker_diarization
@@ -699,7 +718,7 @@ class AIWorker:
 
                 # Transkripsiyon yap ama konuşmacı olarak warm-up durumu göster
                 segments, _ = self.transcriber.transcribe(
-                    tmp_path, word_timestamps=True, language=WHISPER_LANGUAGE
+                    audio_np_16k, word_timestamps=True, language=WHISPER_LANGUAGE
                 )
                 segments = list(segments)
 
@@ -734,7 +753,7 @@ class AIWorker:
 
                 # Transkripsiyon
                 segments, _ = self.transcriber.transcribe(
-                    tmp_path, word_timestamps=True, language=WHISPER_LANGUAGE
+                    audio_np_16k, word_timestamps=True, language=WHISPER_LANGUAGE
                 )
                 segments = list(segments)
 
@@ -773,9 +792,3 @@ class AIWorker:
             import traceback
             traceback.print_exc()
             return None
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except OSError as exc:
-                    logger.warning("Could not delete temporary file %s: %s", tmp_path, exc)
