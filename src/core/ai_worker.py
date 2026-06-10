@@ -59,7 +59,19 @@ class SpeakerTracker:
     Faz 1 (Warm-up): Kaliteli embedding'ler toplanır, kümelenir.
     Faz 2 (Aktif):   Yeni embedding'ler baseline'larla karşılaştırılır.
                       Güncelleme confidence-weighted yapılır.
+
+    Yeni konuşmacı ekleme: Onay tamponu (confirmation buffer) sistemi.
+    - Bilinmeyen bir ses ilk görüldüğünde hemen konuşmacı oluşturulmaz.
+    - Embedding "aday" olarak tamponlanır.
+    - Aynı bilinmeyen ses birden fazla kez tutarlı şekilde görülürse
+      (embedding'ler kendi aralarında benzer) yeni konuşmacı oluşturulur.
+    - Tek seferlik sesler (oyun efektleri, müzik) otomatik filtrelenir.
     """
+
+    # Aday tamponu sabitleri
+    CANDIDATE_CONFIRMATIONS_NEEDED = 2   # Yeni konuşmacı için gereken min gözlem
+    CANDIDATE_TTL = 5                    # Onaylanmayan adaylar kaç chunk sonra silinir
+    CANDIDATE_SELF_SIMILARITY = 0.60     # Aday embedding'lerin kendi aralarındaki min benzerlik
 
     def __init__(self, threshold=None, warmup_ms=None):
         self.threshold = threshold if threshold is not None else DIARIZATION_EMBEDDING_THRESHOLD
@@ -74,6 +86,11 @@ class SpeakerTracker:
         self._warmup_audio_ms = 0  # toplam işlenen ses süresi
         self._warmup_complete = False
 
+        # Yeni konuşmacı aday tamponu
+        # Her aday: {"embeddings": [tensor, ...], "created_at": int}
+        self._candidates = []
+        self._chunk_counter = 0
+
     def reset(self):
         """Tracker durumunu sıfırlayarak yeni bir dosya için hazır hale getirir."""
         self.known_speakers = {}
@@ -81,6 +98,8 @@ class SpeakerTracker:
         self._warmup_buffer = []
         self._warmup_audio_ms = 0
         self._warmup_complete = False
+        self._candidates = []
+        self._chunk_counter = 0
 
     def _next_label(self):
         label = f"SPEAKER_{self._next_id:02d}"
@@ -202,10 +221,67 @@ class SpeakerTracker:
 
         self._warmup_buffer = []
 
+    def _find_matching_candidate(self, emb):
+        """
+        Aday tamponunda bu embedding'e benzer bir aday var mı?
+        Varsa adayın index'ini döndürür, yoksa -1.
+        """
+        for idx, cand in enumerate(self._candidates):
+            centroid = torch.stack(cand["embeddings"]).mean(dim=0)
+            score = torch.nn.functional.cosine_similarity(
+                emb.unsqueeze(0), centroid.unsqueeze(0)
+            ).item()
+            if score >= self.CANDIDATE_SELF_SIMILARITY:
+                return idx
+        return -1
+
+    def _try_promote_candidate(self, candidate):
+        """
+        Aday yeterli onay aldıysa ve embedding'ler kendi aralarında
+        tutarlıysa gerçek konuşmacıya yükseltir.
+
+        Returns:
+            str veya None: Yeni konuşmacı etiketi, veya None
+        """
+        if len(candidate["embeddings"]) < self.CANDIDATE_CONFIRMATIONS_NEEDED:
+            return None
+
+        embs = candidate["embeddings"]
+
+        # Kendi aralarında tutarlılık kontrolü
+        if len(embs) >= 2:
+            pair_scores = []
+            for i in range(len(embs)):
+                for j in range(i + 1, len(embs)):
+                    s = torch.nn.functional.cosine_similarity(
+                        embs[i].unsqueeze(0), embs[j].unsqueeze(0)
+                    ).item()
+                    pair_scores.append(s)
+            avg_self_sim = sum(pair_scores) / len(pair_scores)
+            if avg_self_sim < self.CANDIDATE_SELF_SIMILARITY:
+                return None
+
+        # Onaylandı — yeni konuşmacı oluştur
+        centroid = torch.stack(embs).mean(dim=0)
+        norm = torch.norm(centroid)
+        if norm > 0:
+            centroid = centroid / norm
+        new_label = self._next_label()
+        self.known_speakers[new_label] = centroid
+        return new_label
+
+    def _expire_old_candidates(self):
+        """TTL süresi dolan adayları temizler."""
+        self._candidates = [
+            c for c in self._candidates
+            if (self._chunk_counter - c["created_at"]) < self.CANDIDATE_TTL
+        ]
+
     def map_speakers(self, embeddings_dict):
         """
         Embedding'lere göre konuşmacıları eşler (warm-up sonrası).
         Confidence-weighted baseline güncelleme yapar.
+        Bilinmeyen sesler için onay tamponu kullanır.
 
         Args:
             embeddings_dict: {local_label: embedding_tensor}
@@ -213,6 +289,8 @@ class SpeakerTracker:
         Returns:
             dict: {local_label: global_label}
         """
+        self._chunk_counter += 1
+        self._expire_old_candidates()
         mapping = {}
 
         for local_label, emb in embeddings_dict.items():
@@ -259,14 +337,36 @@ class SpeakerTracker:
                 print(f"  [Uncertain match] mapped to {best_match} (score: {best_score:.3f} < {self.threshold})")
 
             else:
-                # Yeni konuşmacı tespit edildi
-                new_label = self._next_label()
-                mapping[local_label] = new_label
-                self.known_speakers[new_label] = emb.clone()
-                if best_match:
-                    print(f"  🆕 New speaker: {new_label} (closest: {best_match}, score: {best_score:.3f})")
+                # Bilinmeyen ses — aday tamponuna ekle veya mevcut adayı onayla
+                cand_idx = self._find_matching_candidate(emb)
+
+                if cand_idx >= 0:
+                    # Mevcut adaya yeni gözlem ekle
+                    self._candidates[cand_idx]["embeddings"].append(emb.clone())
+                    promoted_label = self._try_promote_candidate(self._candidates[cand_idx])
+
+                    if promoted_label:
+                        # Aday onaylandı, gerçek konuşmacı oldu
+                        mapping[local_label] = promoted_label
+                        closest_info = f" (closest: {best_match}, score: {best_score:.3f})" if best_match else ""
+                        confirms = len(self._candidates[cand_idx]["embeddings"])
+                        print(f"  🆕 New speaker: {promoted_label}{closest_info} [confirmed after {confirms} observations]")
+                        self._candidates.pop(cand_idx)
+                    else:
+                        # Henüz yeterli onay yok — en yakın bilinen konuşmacıya ata
+                        mapping[local_label] = best_match if best_match else "Unknown"
+                        confirms = len(self._candidates[cand_idx]["embeddings"])
+                        needed = self.CANDIDATE_CONFIRMATIONS_NEEDED
+                        print(f"  [Candidate] pending ({confirms}/{needed}), mapped to {mapping[local_label]}")
                 else:
-                    print(f"  🆕 New speaker: {new_label}")
+                    # Yeni aday oluştur
+                    self._candidates.append({
+                        "embeddings": [emb.clone()],
+                        "created_at": self._chunk_counter,
+                    })
+                    mapping[local_label] = best_match if best_match else "Unknown"
+                    closest_info = f" (closest: {best_match}, score: {best_score:.3f})" if best_match else ""
+                    print(f"  [Candidate] new candidate registered{closest_info}, mapped to {mapping[local_label]}")
 
         return mapping
 
