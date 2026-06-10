@@ -173,20 +173,50 @@ class AudioProcessApp(ctk.CTk):
             self.textbox.insert("end", "🔴 CANLI DİNLENİYOR VE ÇEVRİLİYOR...\n")
             self.textbox.insert("end", "==================================================\n\n")
             
+            # If it's a final event, ensure space and insert
+            if event["type"] == "final":
+                idx = event.get("segment_index", len(self.finalized_segments))
+                while len(self.finalized_segments) <= idx:
+                    self.finalized_segments.append("")
+                self.finalized_segments[idx] = event["text"]
+
             # Re-insert finalized segments
             for seg in self.finalized_segments:
                 self.textbox.insert("end", seg + "\n\n")
                 
-            # If it's a final event, append it to finalized list and insert it
-            if event["type"] == "final":
-                self.finalized_segments.append(event["text"])
-                self.textbox.insert("end", event["text"] + "\n\n")
-            else:
+            if event["type"] != "final":
                 # If it's a partial event, show it at the end
                 self.textbox.insert("end", f"[Canlı] {event['text']}\n")
                 
             self.textbox.configure(state="disabled")
             self.textbox.see("end")
+
+        self.after(0, update_ui)
+
+    def on_speaker_update(self, event):
+        """
+        Geriye dönük konuşmacı etiket güncellemesi.
+        """
+        def update_ui():
+            segment_index = event["segment_index"]
+            text = event["text"]
+            
+            if 0 <= segment_index < len(self.finalized_segments):
+                self.finalized_segments[segment_index] = text
+                
+                self.textbox.configure(state="normal")
+                self.textbox.delete("1.0", "end")
+                
+                # Re-insert headers
+                self.textbox.insert("end", "==================================================\n")
+                self.textbox.insert("end", "🔴 CANLI DİNLENİYOR VE ÇEVRİLİYOR...\n")
+                self.textbox.insert("end", "==================================================\n\n")
+                
+                for seg in self.finalized_segments:
+                    self.textbox.insert("end", seg + "\n\n")
+                    
+                self.textbox.configure(state="disabled")
+                self.textbox.see("end")
 
         self.after(0, update_ui)
 
@@ -223,6 +253,7 @@ class AudioProcessApp(ctk.CTk):
                 "stop_event": self.stop_event,
                 "on_status_change": self.on_status_change,
                 "on_transcription": self.on_transcription,
+                "on_speaker_update": self.on_speaker_update,
                 "device_index": device_index,
             },
             daemon=True,

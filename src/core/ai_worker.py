@@ -638,17 +638,14 @@ class AIWorker:
 
     def process_chunk(self, chunk_bytes, is_final=True):
         """
-        Bir ses parçasını işler: transkripsiyon + konuşmacı ayrıştırma.
-
-        Warm-up fazında:  Transkripsiyon yapar, embedding toplar, konuşmacı etiket atanmaz.
-        Aktif fazda:      Transkripsiyon + diarization + embedding eşleme + smoothing.
+        Bir ses parçasını işler: transkripsiyon yapar.
 
         Args:
             chunk_bytes: Ham ses verisi (bytes, int16)
             is_final: Eğer False ise sadece hızlı transkripsiyon yapılır (diarization pas geçilir)
 
         Returns:
-            list[dict] veya None: Her segment için {speaker, start, end, text}.
+            dict: Sonuçları ve diarization için gerekli waveform bilgilerini içeren dict.
         """
         if not self._loaded:
             return None
@@ -688,9 +685,50 @@ class AIWorker:
                         "end": segment.end,
                         "text": segment.text,
                     })
-                return results
+                return {"results": results}
 
-            # --- Diarization (Sadece final chunk'lar için) ---
+            # EĞER FİNAL İSE:
+            # Sadece Whisper ile yüksek kaliteli transkripsiyon yap
+            segments, _ = self.transcriber.transcribe(
+                audio_np_16k,
+                beam_size=3,
+                word_timestamps=True,
+                language=WHISPER_LANGUAGE,
+            )
+            segments = list(segments)
+
+            if len(segments) == 0:
+                return None
+
+            results = []
+            for segment in segments:
+                results.append({
+                    "speaker": "Çözümleniyor...",
+                    "start": segment.start,
+                    "end": segment.end,
+                    "text": segment.text,
+                })
+
+            return {
+                "results": results,
+                "waveform_16k": waveform_16k,
+                "sample_rate": sample_rate,
+                "chunk_duration_ms": chunk_duration_ms
+            }
+
+        except Exception as e:
+            print(f"\n⚠️ [Transcription Error]: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def run_diarization(self, waveform_16k, sample_rate, chunk_duration_ms, transcribed_segments):
+        """
+        Finalleşmiş bir ses parçası üzerinde pyannote diarization, konuşmacı eşleme
+        ve etiket yumuşatma işlemlerini çalıştırır. Arka plan thread'inde çalışacak şekilde tasarlanmıştır.
+        """
+        try:
+            # --- Diarization ---
             pyannote_input = {"waveform": waveform_16k, "sample_rate": sample_rate}
             pipeline_output = self.diarizer(pyannote_input)
             if hasattr(pipeline_output, "speaker_diarization"):
@@ -715,26 +753,7 @@ class AIWorker:
 
                 remaining_ms = max(0, self.speaker_tracker.warmup_ms - self.speaker_tracker._warmup_audio_ms)
                 warmup_label = f"[Calibrating... {remaining_ms / 1000:.0f}s]"
-
-                # Transkripsiyon yap ama konuşmacı olarak warm-up durumu göster
-                segments, _ = self.transcriber.transcribe(
-                    audio_np_16k, word_timestamps=True, language=WHISPER_LANGUAGE
-                )
-                segments = list(segments)
-
-                if len(segments) == 0:
-                    return None
-
-                results = []
-                for segment in segments:
-                    results.append({
-                        "speaker": warmup_label,
-                        "start": segment.start,
-                        "end": segment.end,
-                        "text": segment.text,
-                    })
-                return results
-
+                speaker_mapping = {t["speaker"]: warmup_label for t in turns}
             else:
                 # Aktif faz: embedding-based konuşmacı eşleme
                 if turns and embeddings_dict:
@@ -748,47 +767,37 @@ class AIWorker:
                 else:
                     speaker_mapping = {}
 
+            for turn in turns:
+                turn["speaker"] = speaker_mapping.get(turn["speaker"], turn["speaker"])
+
+            # Segmentleri konuşmacılarla eşle (overlap-based)
+            results = []
+            for segment in transcribed_segments:
+                best_speaker = "Unknown"
+                best_overlap = 0.0
+
                 for turn in turns:
-                    turn["speaker"] = speaker_mapping.get(turn["speaker"], turn["speaker"])
+                    overlap_start = max(segment["start"], turn["start"])
+                    overlap_end = min(segment["end"], turn["end"])
+                    overlap = max(0.0, overlap_end - overlap_start)
 
-                # Transkripsiyon
-                segments, _ = self.transcriber.transcribe(
-                    audio_np_16k, word_timestamps=True, language=WHISPER_LANGUAGE
-                )
-                segments = list(segments)
+                    if overlap > best_overlap:
+                        best_overlap = overlap
+                        best_speaker = turn["speaker"]
 
-                if len(segments) == 0:
-                    return None
+                results.append({
+                    "speaker": best_speaker,
+                    "start": segment["start"],
+                    "end": segment["end"],
+                    "text": segment["text"],
+                })
 
-                # Segmentleri konuşmacılarla eşle (overlap-based)
-                results = []
-                for segment in segments:
-                    best_speaker = "Unknown"
-                    best_overlap = 0.0
-
-                    for turn in turns:
-                        overlap_start = max(segment.start, turn["start"])
-                        overlap_end = min(segment.end, turn["end"])
-                        overlap = max(0.0, overlap_end - overlap_start)
-
-                        if overlap > best_overlap:
-                            best_overlap = overlap
-                            best_speaker = turn["speaker"]
-
-                    results.append({
-                        "speaker": best_speaker,
-                        "start": segment.start,
-                        "end": segment.end,
-                        "text": segment.text,
-                    })
-
-                # Speaker label smoothing
-                results = self._smooth_speaker_labels(results)
-
-                return results
+            # Speaker label smoothing
+            results = self._smooth_speaker_labels(results)
+            return results
 
         except Exception as e:
-            print(f"\n⚠️ [Transcription Error]: {e}")
+            print(f"\n⚠️ [Diarization Error]: {e}")
             import traceback
             traceback.print_exc()
-            return None
+            return transcribed_segments

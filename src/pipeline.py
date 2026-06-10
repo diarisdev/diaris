@@ -57,10 +57,44 @@ def _emit_status(message: str, on_status_change=None) -> None:
         on_status_change(message)
 
 
-def _worker_loop(audio_queue, ai_worker, on_transcription=None):
+def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None):
+    """Process queued diarization tasks in the background."""
+    while True:
+        task = diarization_queue.get()
+        try:
+            if task is STOP_SENTINEL:
+                return
+
+            segment_index = task["segment_index"]
+            waveform_16k = task["waveform_16k"]
+            sample_rate = task["sample_rate"]
+            chunk_duration_ms = task["chunk_duration_ms"]
+            transcribed_segments = task["transcribed_segments"]
+
+            # Run Pyannote diarization in background
+            results = ai_worker.run_diarization(
+                waveform_16k, sample_rate, chunk_duration_ms, transcribed_segments
+            )
+
+            # Format and send update
+            formatted_str = format_results(results, return_str=True)
+            if formatted_str:
+                if on_speaker_update:
+                    on_speaker_update({"segment_index": segment_index, "text": formatted_str})
+                else:
+                    print(f"\n[Diarization Güncellemesi] Segment {segment_index}:\n{formatted_str}\n")
+        except Exception:
+            logger.exception("Diarization worker failed in background loop")
+        finally:
+            diarization_queue.task_done()
+
+
+def _worker_loop(audio_queue, diarization_queue, ai_worker, on_transcription=None):
     """Process queued audio chunks until a sentinel is received."""
     if not ai_worker.load_models():
         return
+
+    segment_index = 0
 
     while True:
         task = audio_queue.get()
@@ -94,24 +128,46 @@ def _worker_loop(audio_queue, ai_worker, on_transcription=None):
                     pass
 
             is_final = (task_type == "final")
-            results = ai_worker.process_chunk(chunk_bytes, is_final=is_final)
+            output = ai_worker.process_chunk(chunk_bytes, is_final=is_final)
+            if not output:
+                continue
+
+            results = output.get("results", [])
 
             if is_final:
                 formatted_str = format_results(results, return_str=True)
+                # Send the final transcript immediately with "Çözümleniyor..." speaker tag
+                if formatted_str:
+                    if on_transcription:
+                        on_transcription({
+                            "type": "final",
+                            "segment_index": segment_index,
+                            "text": formatted_str
+                        })
+                    else:
+                        print("\n" + formatted_str + "\n")
+
+                # Queue for background diarization
+                diarization_queue.put({
+                    "segment_index": segment_index,
+                    "waveform_16k": output["waveform_16k"],
+                    "sample_rate": output["sample_rate"],
+                    "chunk_duration_ms": output["chunk_duration_ms"],
+                    "transcribed_segments": results
+                })
+                segment_index += 1
             else:
                 if results:
                     formatted_str = " ".join(r["text"] for r in results).strip()
                 else:
                     formatted_str = ""
 
-            if formatted_str:
-                if on_transcription:
-                    on_transcription({"type": task_type, "text": formatted_str})
-                else:
-                    if is_final:
-                        print("\n" + formatted_str + "\n")
+                if formatted_str:
+                    if on_transcription:
+                        on_transcription({"type": "partial", "text": formatted_str})
                     else:
                         print(f"\r\033[K[Canlı] {formatted_str}", end="", flush=True)
+
         except Exception:
             logger.exception("AI worker failed while processing a chunk")
         finally:
@@ -186,7 +242,7 @@ def _save_recording(frames, channels, rate, sample_width, on_status_change=None)
     _emit_status(f"✅ Dosya kaydedildi: {os.path.abspath(OUTPUT_FILENAME)}", on_status_change)
 
 
-def run(stop_event=None, on_status_change=None, on_transcription=None, allow_interactive_device=False, device_index=None):
+def run(stop_event=None, on_status_change=None, on_transcription=None, on_speaker_update=None, allow_interactive_device=False, device_index=None):
     """
     Run the live recording and transcription loop.
 
@@ -200,7 +256,9 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, allow_int
     p = pyaudio.PyAudio()
     stream = None
     audio_queue = queue.Queue()
+    diarization_queue = queue.Queue()
     ai_thread = None
+    diarization_thread = None
     state = RecordingState()
     channels = None
     rate = None
@@ -224,12 +282,20 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, allow_int
 
         vad_engine = VADEngine()
         ai_worker = AIWorker(rate=rate, channels=channels)
+        
         ai_thread = threading.Thread(
             target=_worker_loop,
-            args=(audio_queue, ai_worker, on_transcription),
+            args=(audio_queue, diarization_queue, ai_worker, on_transcription),
             daemon=True,
         )
         ai_thread.start()
+
+        diarization_thread = threading.Thread(
+            target=_diarization_loop,
+            args=(diarization_queue, ai_worker, on_speaker_update),
+            daemon=True,
+        )
+        diarization_thread.start()
 
         stream = p.open(
             format=FORMAT,
@@ -279,6 +345,11 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, allow_int
             ai_thread.join(timeout=30)
         elif ai_thread:
             logger.warning("AI worker was not running during shutdown")
+
+        if diarization_thread and diarization_thread.is_alive():
+            diarization_queue.put(STOP_SENTINEL)
+            diarization_queue.join()
+            diarization_thread.join(timeout=30)
 
         if channels is not None and rate is not None:
             sample_width = p.get_sample_size(FORMAT)

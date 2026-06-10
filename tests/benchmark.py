@@ -113,7 +113,8 @@ def run_benchmark(limit=20, min_duration=2.0, max_duration=15.0, use_jiwer=False
                 chunk_bytes = audio_data.tobytes()
                 
                 # AIWorker ile işle
-                results = ai_worker.process_chunk(chunk_bytes)
+                output = ai_worker.process_chunk(chunk_bytes)
+                results = output.get("results") if isinstance(output, dict) else output
                 if results:
                     hypothesis = " ".join(r["text"].strip() for r in results)
                 else:
@@ -381,7 +382,8 @@ def run_diarization_benchmark_aiworker(max_minutes=None):
                 if has_spoken and (silence_counter > active_silence_limit or current_duration_ms >= MAX_CHUNK_DURATION_MS):
                     # AIWorker'a gönder
                     chunk_bytes_to_send = b''.join(chunk_buffer)
-                    results = ai_worker.process_chunk(chunk_bytes_to_send)
+                    output = ai_worker.process_chunk(chunk_bytes_to_send)
+                    results = output.get("results") if isinstance(output, dict) else output
                     
                     if results:
                         for r in results:
