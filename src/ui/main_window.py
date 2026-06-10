@@ -808,15 +808,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def stop_recording(self):
         self.stop_btn.setEnabled(False)
+        self.safe_on_status_change("Yapay zeka kapatılıyor...")
         self.stop_event.set()
         self.tray.update_icon(is_recording=False)
         self._shutdown_retries = 0
-        QtCore.QTimer.singleShot(1000, self.check_thread_dead)
+        QtCore.QTimer.singleShot(500, self.check_thread_dead)
 
     def check_thread_dead(self):
         self._shutdown_retries += 1
+        QtWidgets.QApplication.processEvents()
+        
         if self.pipeline_thread and self.pipeline_thread.is_alive():
-            if self._shutdown_retries < 30:  # max ~15s (30 * 500ms)
+            if self._shutdown_retries < 10:  # max 5s (10 * 500ms)
+                self.safe_on_status_change(f"Yapay zeka kapatılıyor... ({5 - self._shutdown_retries // 2}s)")
                 QtCore.QTimer.singleShot(500, self.check_thread_dead)
             else:
                 # Give up waiting — force UI back to ready state
@@ -838,11 +842,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self.activateWindow()
 
     def close_app(self):
-        # Kapatmadan önce kaydı durdur ve thread'in bitmesini bekle
+        # UI öğelerini devre dışı bırak
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(False)
+        self.device_combo.setEnabled(False)
+        self.refresh_btn.setEnabled(False)
+        self.lang_combo.setEnabled(False)
+        self.exit_btn.setEnabled(False)
+        
+        # Eğer kayıt devam ediyorsa durdur ve beklemeye başla
         if self.pipeline_thread and self.pipeline_thread.is_alive():
+            self.safe_on_status_change("Yapay zeka kapatılıyor...")
             self.stop_event.set()
-            self.pipeline_thread.join(timeout=10)
-            
+            self._close_retries = 0
+            QtCore.QTimer.singleShot(500, self.wait_and_close_app)
+        else:
+            self.safe_on_status_change("Sistem kapatılıyor...")
+            QtCore.QTimer.singleShot(500, self.finalize_close_app)
+
+    def wait_and_close_app(self):
+        self._close_retries += 1
+        QtWidgets.QApplication.processEvents()
+        
+        if self.pipeline_thread and self.pipeline_thread.is_alive():
+            if self._close_retries < 10:  # max 5s (10 * 500ms)
+                self.safe_on_status_change(f"Yapay zeka kapatılıyor... ({5 - self._close_retries // 2}s)")
+                QtCore.QTimer.singleShot(500, self.wait_and_close_app)
+            else:
+                self.safe_on_status_change("Zaman aşımı! Zorla kapatılıyor...")
+                QtCore.QTimer.singleShot(500, self.finalize_close_app)
+        else:
+            self.safe_on_status_change("Sistem kapatılıyor...")
+            QtCore.QTimer.singleShot(500, self.finalize_close_app)
+
+    def finalize_close_app(self):
         self.overlay.close()
         self.tray.tray.hide()
         QtWidgets.QApplication.quit()
