@@ -22,10 +22,13 @@ def main():
     if "--cli" in sys.argv:
         from src.pipeline import run
         run(allow_interactive_device=True)
-    else:
+    elif "--tk" in sys.argv or "--tkinter" in sys.argv:
         from src.gui import AudioProcessApp
         app = AudioProcessApp()
         app.mainloop()
+    else:
+        from src.ui import run_qt_app
+        run_qt_app()
 
 if __name__ == "__main__":
     main()
