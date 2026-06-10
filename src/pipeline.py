@@ -25,9 +25,11 @@ from .config import (
     SILENCE_LIMIT,
     SOFT_CHUNK_DURATION_MS,
     ensure_output_dir,
+    WHISPER_LANGUAGE,
 )
 from .core.ai_worker import AIWorker
 from .core.formatting import format_results
+from .translation import get_translation_engine
 
 logger = logging.getLogger(__name__)
 FORMAT = pyaudio.paInt16
@@ -89,12 +91,13 @@ def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None):
             diarization_queue.task_done()
 
 
-def _worker_loop(audio_queue, diarization_queue, ai_worker, on_transcription=None):
+def _worker_loop(audio_queue, diarization_queue, ai_worker, translation_engine, source_lang, target_lang, on_transcription=None):
     """Process queued audio chunks until a sentinel is received."""
     if not ai_worker.load_models():
         return
 
     segment_index = 0
+    is_translation_needed = (source_lang.split("-")[0].lower() != "tr")
 
     while True:
         task = audio_queue.get()
@@ -134,9 +137,15 @@ def _worker_loop(audio_queue, diarization_queue, ai_worker, on_transcription=Non
 
             results = output.get("results", [])
 
+            # Translate synchronously in ASR background thread (extremely fast, ~30ms)
+            if is_translation_needed and translation_engine and results:
+                for r in results:
+                    if r.get("text"):
+                        r["text"] = translation_engine.translate(r["text"], source_lang, target_lang)
+
             if is_final:
                 formatted_str = format_results(results, return_str=True)
-                # Send the final transcript immediately with "Çözümleniyor..." speaker tag
+                # Send the final transcript immediately
                 if formatted_str:
                     if on_transcription:
                         on_transcription({
@@ -147,7 +156,7 @@ def _worker_loop(audio_queue, diarization_queue, ai_worker, on_transcription=Non
                     else:
                         print("\n" + formatted_str + "\n")
 
-                # Queue for background diarization
+                # Queue for background diarization (results are already translated)
                 diarization_queue.put({
                     "segment_index": segment_index,
                     "waveform_16k": output["waveform_16k"],
@@ -283,9 +292,15 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
         vad_engine = VADEngine()
         ai_worker = AIWorker(rate=rate, channels=channels)
         
+        # Setup translation
+        source_lang = WHISPER_LANGUAGE
+        target_lang = "tr"
+        # Using default google translation engine
+        translation_engine = get_translation_engine("google")
+
         ai_thread = threading.Thread(
             target=_worker_loop,
-            args=(audio_queue, diarization_queue, ai_worker, on_transcription),
+            args=(audio_queue, diarization_queue, ai_worker, translation_engine, source_lang, target_lang, on_transcription),
             daemon=True,
         )
         ai_thread.start()

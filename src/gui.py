@@ -182,7 +182,8 @@ class AudioProcessApp(ctk.CTk):
 
             # Re-insert finalized segments
             for seg in self.finalized_segments:
-                self.textbox.insert("end", seg + "\n\n")
+                if seg:
+                    self.textbox.insert("end", seg + "\n\n")
                 
             if event["type"] != "final":
                 # If it's a partial event, show it at the end
@@ -213,7 +214,8 @@ class AudioProcessApp(ctk.CTk):
                 self.textbox.insert("end", "==================================================\n\n")
                 
                 for seg in self.finalized_segments:
-                    self.textbox.insert("end", seg + "\n\n")
+                    if seg:
+                        self.textbox.insert("end", seg + "\n\n")
                     
                 self.textbox.configure(state="disabled")
                 self.textbox.see("end")
