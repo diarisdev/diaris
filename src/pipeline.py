@@ -26,6 +26,7 @@ from .config import (
     SOFT_CHUNK_DURATION_MS,
     ensure_output_dir,
     WHISPER_LANGUAGE,
+    LOCAL_MODELS_DIR,
 )
 from .core.ai_worker import AIWorker
 from .core.formatting import format_results
@@ -136,6 +137,19 @@ def _worker_loop(audio_queue, diarization_queue, ai_worker, translation_engine, 
                 continue
 
             results = output.get("results", [])
+
+            # Combine all results into a single segment for better translation context and cleaner UI
+            if results:
+                combined_text = " ".join(r["text"].strip() for r in results).strip()
+                start_time = results[0]["start"]
+                end_time = results[-1]["end"]
+                speaker = results[0]["speaker"]
+                results = [{
+                    "speaker": speaker,
+                    "start": start_time,
+                    "end": end_time,
+                    "text": combined_text
+                }]
 
             # Translate synchronously in ASR background thread (extremely fast, ~30ms)
             if is_translation_needed and translation_engine and results:
@@ -295,8 +309,29 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
         # Setup translation
         source_lang = WHISPER_LANGUAGE
         target_lang = "tr"
-        # Using default google translation engine
-        translation_engine = get_translation_engine("google")
+        
+        # Auto-detect translation engine based on available models and API keys
+        deepl_key = os.getenv("DEEPL_API_KEY")
+        nllb_path = os.path.join(LOCAL_MODELS_DIR, "ctranslate2-nllb-200-distilled-600M")
+        
+        if deepl_key:
+            translation_engine = get_translation_engine("deepl", api_key=deepl_key)
+            engine_name = "DeepL API (Online)"
+        elif os.path.exists(nllb_path):
+            translation_engine = get_translation_engine("ctranslate2", model_path=nllb_path)
+            if hasattr(translation_engine, 'translator') and translation_engine.translator is not None:
+                engine_name = "CTranslate2 (NLLB-200 Local)"
+            else:
+                engine_name = "Google Translate (Online - Fallback)"
+        else:
+            translation_engine = get_translation_engine("google")
+            engine_name = "Google Translate (Online)"
+            
+        is_translation_needed = (source_lang.split("-")[0].lower() != "tr")
+        if is_translation_needed:
+            print(f"🌐 [Çeviri Aktif] Kaynak Dil: {source_lang} -> Hedef Dil: {target_lang} | Motor: {engine_name}")
+        else:
+            print(f"🌐 [Çeviri Devre Dışı] Kaynak dil zaten Türkçe ({source_lang}).")
 
         ai_thread = threading.Thread(
             target=_worker_loop,

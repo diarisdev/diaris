@@ -33,6 +33,13 @@ MODEL_SPECS = [
         "requires_token": True,
         "ignore_patterns": None,
     },
+    {
+        "name": "NLLB-200 Translation",
+        "repo_id": "Tushe/nllb-200-600M-ct2-int8",
+        "local_dir": MODELS_DIR / "ctranslate2-nllb-200-distilled-600M",
+        "requires_token": False,
+        "ignore_patterns": None,
+    },
 ]
 
 
