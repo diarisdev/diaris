@@ -38,9 +38,10 @@ class SubtitleOverlay(QtWidgets.QWidget):
         self.drag_position = QtCore.QPoint()
         
         # Seçenekler
-        self.font_size = 18
+        self.font_size = 14
         self.opacity = 0.8
         self.click_through = False
+        self.speaker_coloring = True
         
         # Resizing states
         self.is_resizing = False
@@ -65,15 +66,15 @@ class SubtitleOverlay(QtWidgets.QWidget):
         
         # Ekranın alt-orta kısmına varsayılan konumlandırma
         screen = QtWidgets.QApplication.primaryScreen().geometry()
-        width = 800
-        height = 160
+        width = 1050
+        height = 200
         x = (screen.width() - width) // 2
         y = screen.height() - height - 100
         self.setGeometry(x, y, width, height)
 
     def setup_ui(self):
         self.layout = QtWidgets.QVBoxLayout(self)
-        self.layout.setContentsMargins(10, 10, 10, 10)
+        self.layout.setContentsMargins(12, 12, 12, 12)
         self.layout.setSpacing(8)
         
         # Gövde çerçevesi (Glassmorphic Container)
@@ -97,18 +98,14 @@ class SubtitleOverlay(QtWidgets.QWidget):
     def update_appearance(self):
         # Yarı saydam arka plan stili (Glassmorphism)
         alpha = round(max(0.2, min(1.0, self.opacity)) * 255)
+        border_alpha = min(255, alpha + 30)
         self.container.setStyleSheet(f"""
             QFrame#OverlayContainer {{
                 background-color: rgba(12, 15, 20, {alpha});
-                border: 1px solid rgba(255, 255, 255, 0.18);
+                border: 1px solid rgba(255, 255, 255, {border_alpha // 5});
                 border-radius: 14px;
             }}
         """)
-        shadow = QtWidgets.QGraphicsDropShadowEffect(self.container)
-        shadow.setBlurRadius(28)
-        shadow.setOffset(0, 12)
-        shadow.setColor(QtGui.QColor(0, 0, 0, 110))
-        self.container.setGraphicsEffect(shadow)
         self.render_subtitles()
 
     def set_font_size(self, size):
@@ -131,6 +128,11 @@ class SubtitleOverlay(QtWidgets.QWidget):
         
         # Bayraklar güncellendikten sonra pencereyi tekrar göstermek gerekir
         self.show()
+
+    def set_speaker_coloring(self, enabled):
+        """Konuşmacı renginin tüm altyazı metnini boyayıp boyamayacağını ayarlar."""
+        self.speaker_coloring = enabled
+        self.render_subtitles()
 
     def update_subtitles(self, finalized_segments, partial_text):
         """Yeni altyazıları kabul eder ve arayüzde gösterir."""
@@ -198,9 +200,10 @@ class SubtitleOverlay(QtWidgets.QWidget):
                 row_layout.addWidget(spk_label, 0, QtCore.Qt.AlignmentFlag.AlignTop)
             
             # Metin
+            text_color = seg['color'] if self.speaker_coloring else "#ffffff"
             text_label = QtWidgets.QLabel(seg['text'], row)
             text_label.setFont(QtGui.QFont("Segoe UI", self.font_size))
-            text_label.setStyleSheet("color: #ffffff; background: transparent; border: none;")
+            text_label.setStyleSheet(f"color: {text_color}; background: transparent; border: none;")
             text_label.setWordWrap(True)
             
             row_layout.addWidget(text_label, 1)

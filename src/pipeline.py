@@ -115,7 +115,11 @@ def _worker_loop(audio_queue, diarization_queue, ai_worker, translation_engine, 
                     while True:
                         next_task = audio_queue.get_nowait()
                         if next_task is STOP_SENTINEL:
+                            # Put sentinel back so we pick it up on the
+                            # next iteration and exit cleanly.
                             audio_queue.put(next_task)
+                            # Mark the consumed next_task slot as done.
+                            audio_queue.task_done()
                             break
                         if next_task.get("type") == "partial":
                             audio_queue.task_done()
@@ -391,15 +395,17 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
         if ai_thread and ai_thread.is_alive():
             _emit_status("\nAI kapatılıyor, lütfen bekleyin...", on_status_change)
             audio_queue.put(STOP_SENTINEL)
-            audio_queue.join()
             ai_thread.join(timeout=30)
+            if ai_thread.is_alive():
+                logger.warning("AI worker did not shut down within 30s")
         elif ai_thread:
             logger.warning("AI worker was not running during shutdown")
 
         if diarization_thread and diarization_thread.is_alive():
             diarization_queue.put(STOP_SENTINEL)
-            diarization_queue.join()
             diarization_thread.join(timeout=30)
+            if diarization_thread.is_alive():
+                logger.warning("Diarization worker did not shut down within 30s")
 
         if channels is not None and rate is not None:
             sample_width = p.get_sample_size(FORMAT)

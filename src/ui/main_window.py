@@ -167,7 +167,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Yazı Boyutu Ayarı
         font_label = QtWidgets.QLabel("Yazı boyutu", self.settings_group)
         self.font_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal, self.settings_group)
-        self.font_slider.setRange(12, 32)
+        self.font_slider.setRange(8, 32)
         self.font_slider.setValue(self.overlay.font_size)
         self.font_slider.setMinimumWidth(260)
         self.font_val_label = QtWidgets.QLabel(f"{self.overlay.font_size} px", self.settings_group)
@@ -200,8 +200,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.click_through_cb.setChecked(self.overlay.click_through)
         self.click_through_cb.toggled.connect(self.overlay.set_click_through)
         
+        self.speaker_color_cb = QtWidgets.QCheckBox("Konuşmacı renklendirmesi", self.settings_group)
+        self.speaker_color_cb.setChecked(self.overlay.speaker_coloring)
+        self.speaker_color_cb.setToolTip("Altyazı metnini konuşmacı rengine boyar")
+        self.speaker_color_cb.toggled.connect(self.overlay.set_speaker_coloring)
+        
         self.settings_layout.addWidget(self.show_overlay_cb, 3, 0, 1, 3)
         self.settings_layout.addWidget(self.click_through_cb, 4, 0, 1, 3)
+        self.settings_layout.addWidget(self.speaker_color_cb, 5, 0, 1, 3)
         
         self.layout.addWidget(self.settings_group)
         
@@ -788,11 +794,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_btn.setEnabled(False)
         self.stop_event.set()
         self.tray.update_icon(is_recording=False)
+        self._shutdown_retries = 0
         QtCore.QTimer.singleShot(1000, self.check_thread_dead)
 
     def check_thread_dead(self):
+        self._shutdown_retries += 1
         if self.pipeline_thread and self.pipeline_thread.is_alive():
-            QtCore.QTimer.singleShot(500, self.check_thread_dead)
+            if self._shutdown_retries < 30:  # max ~15s (30 * 500ms)
+                QtCore.QTimer.singleShot(500, self.check_thread_dead)
+            else:
+                # Give up waiting — force UI back to ready state
+                self.start_btn.setEnabled(True)
+                self.device_combo.setEnabled(True)
+                self.refresh_btn.setEnabled(True)
+                self.safe_on_status_change("Durduruldu (zaman aşımı).")
         else:
             self.start_btn.setEnabled(True)
             self.device_combo.setEnabled(True)
@@ -805,9 +820,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.activateWindow()
 
     def close_app(self):
-        # Kapatmadan önce kaydı durdur
+        # Kapatmadan önce kaydı durdur ve thread'in bitmesini bekle
         if self.pipeline_thread and self.pipeline_thread.is_alive():
             self.stop_event.set()
+            self.pipeline_thread.join(timeout=10)
             
         self.overlay.close()
         self.tray.tray.hide()
