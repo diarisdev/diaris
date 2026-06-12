@@ -164,10 +164,12 @@ cython_debug/
 # Yerel AI modelleri
 models/
 
-# Benchmark test data (LibriSpeech ~350MB)
+# Benchmark test data
 tests/data/
+tests/chime6_data/
 
-# Benchmark sonuç dosyaları
+# Benchmark output data
+output/
 benchmark_*.csv
 
 # Çıktı ses dosyaları

@@ -48,6 +48,9 @@ class Settings:
     whisper_language: str
     diarization_embedding_threshold: float
     diarization_warmup_ms: int
+    candidate_confirmations_needed: int
+    candidate_ttl: int
+    candidate_self_similarity: float
 
 
 def load_settings() -> Settings:
@@ -82,6 +85,9 @@ def load_settings() -> Settings:
         whisper_language=os.getenv("WHISPER_LANGUAGE", "en"),
         diarization_embedding_threshold=float(os.getenv("DIARIZATION_EMBEDDING_THRESHOLD", "0.75")),
         diarization_warmup_ms=int(os.getenv("DIARIZATION_WARMUP_MS", "45000")),
+        candidate_confirmations_needed=int(os.getenv("CANDIDATE_CONFIRMATIONS_NEEDED", "2")),
+        candidate_ttl=int(os.getenv("CANDIDATE_TTL", "5")),
+        candidate_self_similarity=float(os.getenv("CANDIDATE_SELF_SIMILARITY", "0.60")),
     )
 
 
@@ -132,3 +138,6 @@ COMPUTE_TYPE = settings.compute_type
 WHISPER_LANGUAGE = settings.whisper_language
 DIARIZATION_EMBEDDING_THRESHOLD = settings.diarization_embedding_threshold
 DIARIZATION_WARMUP_MS = settings.diarization_warmup_ms
+CANDIDATE_CONFIRMATIONS_NEEDED = settings.candidate_confirmations_needed
+CANDIDATE_TTL = settings.candidate_ttl
+CANDIDATE_SELF_SIMILARITY = settings.candidate_self_similarity

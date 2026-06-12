@@ -36,6 +36,7 @@ from ..config import (
     LOCAL_MODELS_DIR,
     DEFAULT_RATE, DEFAULT_CHANNELS, WHISPER_LANGUAGE,
     DIARIZATION_EMBEDDING_THRESHOLD, DIARIZATION_WARMUP_MS,
+    CANDIDATE_CONFIRMATIONS_NEEDED, CANDIDATE_TTL, CANDIDATE_SELF_SIMILARITY,
 )
 from ..audio.utils import calculate_chunk_duration_ms
 
@@ -69,9 +70,9 @@ class SpeakerTracker:
     """
 
     # Aday tamponu sabitleri
-    CANDIDATE_CONFIRMATIONS_NEEDED = 2   # Yeni konuşmacı için gereken min gözlem
-    CANDIDATE_TTL = 5                    # Onaylanmayan adaylar kaç chunk sonra silinir
-    CANDIDATE_SELF_SIMILARITY = 0.60     # Aday embedding'lerin kendi aralarındaki min benzerlik
+    CANDIDATE_CONFIRMATIONS_NEEDED = CANDIDATE_CONFIRMATIONS_NEEDED   # Yeni konuşmacı için gereken min gözlem
+    CANDIDATE_TTL = CANDIDATE_TTL                                     # Onaylanmayan adaylar kaç chunk sonra silinir
+    CANDIDATE_SELF_SIMILARITY = CANDIDATE_SELF_SIMILARITY             # Aday embedding'lerin kendi aralarındaki min benzerlik
 
     def __init__(self, threshold=None, warmup_ms=None):
         self.threshold = threshold if threshold is not None else DIARIZATION_EMBEDDING_THRESHOLD
