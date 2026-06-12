@@ -102,6 +102,7 @@ def prepare_lhotse_manifests(audio_dir: Path, trans_dir: Path, output_dir: Path)
         if not sources:
             continue
             
+
         recording = Recording(
             id=sess_arr,
             sources=sources,
@@ -120,6 +121,7 @@ def prepare_lhotse_manifests(audio_dir: Path, trans_dir: Path, output_dir: Path)
         with open(trans_file, 'r', encoding='utf-8') as f:
             trans_data = json.load(f)
             
+
         seg_idx = 0
         for item in trans_data:
             start_raw = item.get("start_time")
