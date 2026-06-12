@@ -31,6 +31,7 @@ warnings.filterwarnings("ignore", message=r".*std\(\).*degrees of freedom.*")
 warnings.filterwarnings("ignore", message=".*Mean of empty slice.*")
 warnings.filterwarnings("ignore", message=".*invalid value encountered in divide.*")
 
+import gc
 import os
 import sys
 import time
@@ -42,12 +43,17 @@ import numpy as np
 import soundfile as sf
 import torch
 import torchaudio
+import concurrent.futures
 from pathlib import Path
 
 # Add project root to sys.path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+# Ensure CUDA DLLs are discoverable before any model loading
+from src.config import configure_cuda_dll_paths
+configure_cuda_dll_paths()
 
 from tests.evaluator import TranscriptionEvaluator, DiarizationEvaluator
 from src.audio.vad import VADEngine
@@ -73,6 +79,29 @@ def print_and_log(msg, log_file=None):
     if log_file:
         log_file.write(str(msg) + "\n")
         log_file.flush()
+
+
+def _get_process_memory_mb():
+    """Returns current process RSS memory in MB."""
+    try:
+        import psutil
+        return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+    except ImportError:
+        # Fallback for Windows without psutil
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {os.getpid()}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=5
+            )
+            # Parse CSV: "python.exe","1234","Console","1","123,456 K"
+            parts = result.stdout.strip().split(',')
+            if len(parts) >= 5:
+                mem_str = parts[-1].strip().strip('"').replace(',', '').replace('.', '').split()[0]
+                return int(mem_str) / 1024  # KB to MB
+        except Exception:
+            pass
+    return 0.0
 
 
 def parse_time_to_seconds(t_val):
@@ -409,30 +438,35 @@ def process_audio_segment(audio_paths, start_time, end_time, mode, enhance, spea
         
     # Convert to mono float32
     mono_f32 = combined.astype(np.float32) / 32768.0
+    del combined, waveforms  # Free intermediate arrays
     
     # Resample to 16kHz using torchaudio
     waveform_tensor = torch.from_numpy(mono_f32).unsqueeze(0)
+    del mono_f32
     if sr != 16000:
         waveform_tensor = torchaudio.functional.resample(waveform_tensor, orig_freq=sr, new_freq=16000)
     
-    return waveform_tensor.squeeze(0).numpy(), 16000
+    result = waveform_tensor.squeeze(0).numpy()
+    del waveform_tensor
+    return result, 16000
 
 
 def run_oracle_evaluation(ai_worker, ref_segments, audio_paths, mode, enhance, log_file=None):
     """
     Runs Oracle Segment-by-Segment evaluation (Track 1).
     Reads each utterance boundary from the transcript, transcribes it, and compares.
+    Uses ThreadPoolExecutor to overlap CPU audio extraction with GPU inference.
     """
     print_and_log(f"\n[EVAL] Running Oracle Segmentation Evaluation on {len(ref_segments)} segments...", log_file)
-    hyp_segments = []
-    
+    results = [None] * len(ref_segments)
     start_eval_time = time.time()
-    for idx, seg in enumerate(ref_segments, 1):
+    
+    def process_single_segment(idx, seg):
         spk = seg["speaker"]
         start = seg["start"]
         end = seg["end"]
         
-        # 1. Process and load audio segment
+        # 1. Process and load audio segment (CPU-bound)
         audio_segment, sr = process_audio_segment(
             audio_paths=audio_paths,
             start_time=start,
@@ -443,16 +477,9 @@ def run_oracle_evaluation(ai_worker, ref_segments, audio_paths, mode, enhance, l
         )
         
         if audio_segment is None or len(audio_segment) == 0:
-            # Fallback empty hyp
-            hyp_segments.append({
-                "start": start,
-                "end": end,
-                "speaker": spk,
-                "text": ""
-            })
-            continue
+            return idx, {"start": start, "end": end, "speaker": spk, "text": ""}
             
-        # 2. Run Whisper on the segment
+        # 2. Run Whisper on the segment (GPU-bound)
         try:
             segments, _ = ai_worker.transcriber.transcribe(
                 audio_segment,
@@ -463,22 +490,51 @@ def run_oracle_evaluation(ai_worker, ref_segments, audio_paths, mode, enhance, l
             hyp_text = " ".join(s.text.strip() for s in segments)
             hyp_text = clean_chime6_text(hyp_text)
         except Exception as e:
-            print(f"WARNING: Error transcribing segment {idx}: {e}")
+            print(f"\nWARNING: Error transcribing segment {idx+1}: {e}")
             hyp_text = ""
             
-        hyp_segments.append({
-            "start": start,
-            "end": end,
-            "speaker": spk,
-            "text": hyp_text
-        })
+        return idx, {"start": start, "end": end, "speaker": spk, "text": hyp_text}
+
+    completed = 0
+    # Use max_workers=8 to ensure the GPU is constantly fed with pre-processed audio chunks
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_idx = {
+            executor.submit(process_single_segment, idx, seg): idx 
+            for idx, seg in enumerate(ref_segments)
+        }
         
-        # Log progress periodically
-        if idx % 10 == 0 or idx == len(ref_segments):
-            elapsed = time.time() - start_eval_time
-            print(f"   Processed {idx}/{len(ref_segments)} segments ({elapsed:.1f}s)...")
+        for future in concurrent.futures.as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                _, result_seg = future.result()
+                results[idx] = result_seg
+            except Exception as e:
+                print(f"\nWARNING: Unhandled exception in segment {idx+1}: {e}")
+                results[idx] = {"start": ref_segments[idx]["start"], "end": ref_segments[idx]["end"], "speaker": ref_segments[idx]["speaker"], "text": ""}
+                
+            completed += 1
             
-    return hyp_segments
+            # Periodic memory cleanup to prevent OOM on long sessions
+            if completed % 50 == 0:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            
+            # Dynamic Progress Bar
+            elapsed = time.time() - start_eval_time
+            progress = completed / len(ref_segments)
+            bar_len = 30
+            filled = int(bar_len * progress)
+            bar = '█' * filled + '-' * (bar_len - filled)
+            rate = completed / elapsed if elapsed > 0 else 0
+            eta = (len(ref_segments) - completed) / rate if rate > 0 else 0
+            mem_mb = _get_process_memory_mb()
+            
+            sys.stdout.write(f"\r   [{bar}] {completed}/{len(ref_segments)} ({progress*100:.1f}%) | {rate:.1f} seg/s | ETA: {eta:.0f}s | RAM: {mem_mb:.0f}MB")
+            sys.stdout.flush()
+            
+    print()  # Move to the next line after the progress bar finishes
+    return results
 
 
 def run_streaming_evaluation(ai_worker, audio_paths, mode, enhance, limit_minutes=None, log_file=None):
@@ -781,6 +837,18 @@ def compute_cpwer(ref_segments, hyp_segments, evaluator):
                 "hyp_count": len(hyp_words)
             }
             
+            # Simple progress bar for cpWER
+            current_step = i * N + j + 1
+            total_steps = N * N
+            prog = current_step / total_steps
+            bar_len = 20
+            filled = int(bar_len * prog)
+            bar = '█' * filled + '-' * (bar_len - filled)
+            sys.stdout.write(f"\r   [cpWER] [{bar}] {current_step}/{total_steps}")
+            sys.stdout.flush()
+            
+    print()  # Move to next line when done
+            
     # Find best permutation minimizing total cost
     try:
         from scipy.optimize import linear_sum_assignment
@@ -902,6 +970,12 @@ def run_chime6_session(audio_dir, transcript_path, mode, array="U01", enhance="n
             log_file=log_file
         )
         rtf = (time.time() - start_eval_time) / actual_duration if actual_duration > 0 else 0.0
+
+    # Free GPU memory before heavy CPU-based evaluation
+    del ai_worker
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
         
     # 5. Evaluate Performance
     print_and_log("[EVAL] Evaluating performance metrics...", log_file)

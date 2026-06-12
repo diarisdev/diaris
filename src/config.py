@@ -95,18 +95,37 @@ settings = load_settings()
 
 
 def configure_cuda_dll_paths() -> None:
-    """Expose CUDA DLL folders installed by Python wheels on Windows."""
+    """Expose CUDA DLL folders installed by Python wheels or system toolkit on Windows."""
+    dll_dirs_to_add: list[str] = []
+
+    # 1. Check Python wheel nvidia packages (e.g. nvidia-cublas-cu12)
     for site_package in site.getsitepackages():
         for library in ("cublas", "cudnn"):
             lib_path = Path(site_package) / "nvidia" / library / "bin"
-            if not lib_path.exists():
-                continue
-            try:
-                if hasattr(os, "add_dll_directory"):
-                    os.add_dll_directory(str(lib_path))
-                os.environ["PATH"] = str(lib_path) + os.pathsep + os.environ.get("PATH", "")
-            except OSError as exc:
-                logger.warning("Could not add CUDA DLL path %s: %s", lib_path, exc)
+            if lib_path.exists():
+                dll_dirs_to_add.append(str(lib_path))
+
+    # 2. Check project-local CUDA compatibility shims (cuda_compat/)
+    compat_path = PROJECT_ROOT / "cuda_compat"
+    if compat_path.exists():
+        dll_dirs_to_add.append(str(compat_path))
+
+    # 3. Check system CUDA Toolkit installation
+    cuda_base = Path(os.environ.get("CUDA_PATH", r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"))
+    if cuda_base.exists():
+        for version_dir in sorted(cuda_base.iterdir(), reverse=True):
+            for bin_subdir in (version_dir / "bin" / "x64", version_dir / "bin"):
+                if bin_subdir.exists():
+                    dll_dirs_to_add.append(str(bin_subdir))
+                    break
+
+    for dll_dir in dll_dirs_to_add:
+        try:
+            if hasattr(os, "add_dll_directory"):
+                os.add_dll_directory(dll_dir)
+            os.environ["PATH"] = dll_dir + os.pathsep + os.environ.get("PATH", "")
+        except OSError as exc:
+            logger.warning("Could not add CUDA DLL path %s: %s", dll_dir, exc)
 
 
 def ensure_output_dir() -> Path:

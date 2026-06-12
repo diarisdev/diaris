@@ -179,3 +179,5 @@ output/results.csv
 
 # Docs
 docs/
+
+cuda_compat/
