@@ -257,9 +257,25 @@ class AIWorkerEngine:
 # ===================================================================
 
 def _levenshtein_ops(ref_tokens: list[str], hyp_tokens: list[str]) -> tuple[int, int, int]:
-    """Compute substitutions, insertions, deletions via DP."""
+    """Compute substitutions, insertions, deletions via fast rapidfuzz or exact Levenshtein DP."""
     n, m = len(ref_tokens), len(hyp_tokens)
-    # dp[i][j] = (cost, subs, ins, dels)
+    if n == 0:
+        return 0, m, 0
+    if m == 0:
+        return 0, 0, n
+
+    # Try rapidfuzz first
+    try:
+        from rapidfuzz.distance import Levenshtein
+        ops = Levenshtein.editops(ref_tokens, hyp_tokens)
+        subs = sum(1 for op in ops if op.tag == 'replace')
+        ins = sum(1 for op in ops if op.tag == 'insert')
+        dels = sum(1 for op in ops if op.tag == 'delete')
+        return subs, ins, dels
+    except ImportError:
+        pass
+
+    # Fallback to exact Levenshtein DP (since SciPy linear assignment reduces calls to only 32 times, exact DP is extremely fast)
     dp = [[(0, 0, 0, 0)] * (m + 1) for _ in range(n + 1)]
     for i in range(1, n + 1):
         dp[i][0] = (i, 0, 0, i)
@@ -346,8 +362,8 @@ def compute_cpwer(
     """
     Concatenated minimum-permutation WER (cpWER).
 
-    For each permutation of speaker mapping, concatenate all text per speaker
-    and compute WER. Return the permutation with the lowest WER.
+    Finds the optimal mapping of hypothesis speakers to reference speakers
+    that minimizes the total word error rate.
     """
     ref_speakers = sorted(set(s.speaker for s in ref_segments))
     hyp_speakers = sorted(set(s.speaker for s in hyp_segments))
@@ -366,40 +382,80 @@ def compute_cpwer(
     if not ref_speakers:
         total_hyp = " ".join(hyp_text_by_spk.values())
         w = compute_wer("", total_hyp)
-        return {"cpwer": w.wer, "mapping": {}, "wer_result": w}
+        return {
+            "cpwer": w.wer,
+            "mapping": {},
+            "wer_result": w,
+            "per_speaker_details": {}
+        }
 
-    # Try all permutations (feasible for ≤8 speakers)
-    best_wer_val = float("inf")
     best_mapping = {}
-    best_result = None
 
-    hyp_list = list(hyp_speakers)
-    # Pad hyp_list if fewer hyp speakers than ref speakers
-    while len(hyp_list) < len(ref_speakers):
-        hyp_list.append(f"__EMPTY_{len(hyp_list)}__")
+    try:
+        from scipy.optimize import linear_sum_assignment
+        N_ref = len(ref_speakers)
+        
+        # Construct cost matrix: row=ref, col=hyp
+        # If we have fewer hypothesis speakers, we can pad with empty speakers
+        # so that every reference speaker can map to something.
+        padded_hyp_speakers = list(hyp_speakers)
+        while len(padded_hyp_speakers) < N_ref:
+            padded_hyp_speakers.append(f"__EMPTY_{len(padded_hyp_speakers)}__")
+            
+        N_hyp_pad = len(padded_hyp_speakers)
+        cost_matrix = np.zeros((N_ref, N_hyp_pad))
+        
+        for i, ref_spk in enumerate(ref_speakers):
+            ref_tokens = ref_text_by_spk[ref_spk].lower().split()
+            for j, hyp_spk in enumerate(padded_hyp_speakers):
+                hyp_tokens = hyp_text_by_spk.get(hyp_spk, "").lower().split()
+                subs, ins, dels = _levenshtein_ops(ref_tokens, hyp_tokens)
+                cost_matrix[i, j] = subs + ins + dels
+                
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+        for r, c in zip(row_ind, col_ind):
+            best_mapping[ref_speakers[r]] = padded_hyp_speakers[c]
+            
+    except Exception:
+        # Fallback to permutations if scipy is not available
+        best_wer_val = float("inf")
+        hyp_list = list(hyp_speakers)
+        while len(hyp_list) < len(ref_speakers):
+            hyp_list.append(f"__EMPTY_{len(hyp_list)}__")
 
-    for perm in itertools.permutations(hyp_list, len(ref_speakers)):
-        mapping = dict(zip(ref_speakers, perm))
-        total_ref_tokens = []
-        total_hyp_tokens = []
+        for perm in itertools.permutations(hyp_list, len(ref_speakers)):
+            mapping = dict(zip(ref_speakers, perm))
+            total_ref_tokens = []
+            total_hyp_tokens = []
 
-        for ref_spk, hyp_spk in mapping.items():
-            ref_t = ref_text_by_spk.get(ref_spk, "").lower().split()
-            hyp_t = hyp_text_by_spk.get(hyp_spk, "").lower().split()
-            total_ref_tokens.extend(ref_t)
-            total_hyp_tokens.extend(hyp_t)
+            for ref_spk, hyp_spk in mapping.items():
+                ref_t = ref_text_by_spk.get(ref_spk, "").lower().split()
+                hyp_t = hyp_text_by_spk.get(hyp_spk, "").lower().split()
+                total_ref_tokens.extend(ref_t)
+                total_hyp_tokens.extend(hyp_t)
 
-        if not total_ref_tokens:
-            continue
+            if not total_ref_tokens:
+                continue
 
+            subs, ins, dels = _levenshtein_ops(total_ref_tokens, total_hyp_tokens)
+            wr = WERResult(len(total_ref_tokens), len(total_hyp_tokens), subs, ins, dels)
+            if wr.wer < best_wer_val:
+                best_wer_val = wr.wer
+                best_mapping = mapping
+
+    # Now calculate global WER result using the best mapping
+    total_ref_tokens = []
+    total_hyp_tokens = []
+    for ref_spk, hyp_spk in best_mapping.items():
+        ref_t = ref_text_by_spk.get(ref_spk, "").lower().split()
+        hyp_t = hyp_text_by_spk.get(hyp_spk, "").lower().split()
+        total_ref_tokens.extend(ref_t)
+        total_hyp_tokens.extend(hyp_t)
+
+    if total_ref_tokens:
         subs, ins, dels = _levenshtein_ops(total_ref_tokens, total_hyp_tokens)
-        wr = WERResult(len(total_ref_tokens), len(total_hyp_tokens), subs, ins, dels)
-        if wr.wer < best_wer_val:
-            best_wer_val = wr.wer
-            best_mapping = mapping
-            best_result = wr
-
-    if best_result is None:
+        best_result = WERResult(len(total_ref_tokens), len(total_hyp_tokens), subs, ins, dels)
+    else:
         best_result = WERResult(0, 0, 0, 0, 0)
 
     per_speaker_details = {}
