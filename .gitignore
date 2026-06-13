@@ -165,8 +165,9 @@ cython_debug/
 models/
 
 # Benchmark test data
-tests/data/
+tests/libre_speech_data/
 tests/chime6_data/
+tests/ami_data/
 
 # Benchmark output data
 output/
