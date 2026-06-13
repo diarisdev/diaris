@@ -182,3 +182,5 @@ output/results.csv
 docs/
 
 cuda_compat/
+
+tests/data
