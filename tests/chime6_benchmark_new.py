@@ -235,7 +235,10 @@ class AIWorkerEngine:
         if not output:
             return ""
         results = output.get("results", [])
-        return " ".join(r["text"].strip() for r in results)
+        text = " ".join(r["text"].strip() for r in results)
+        del int16
+        del output
+        return text
 
     def transcribe_and_diarize(self, audio_f32: np.ndarray) -> list[dict]:
         """Return list of {speaker, start, end, text} with diarization."""
@@ -249,6 +252,9 @@ class AIWorkerEngine:
         dur_ms = output.get("chunk_duration_ms", 0)
         if waveform is not None and results:
             results = self._worker.run_diarization(waveform, sr, dur_ms, results)
+        del int16
+        del output
+        del waveform
         return results
 
 
@@ -257,7 +263,7 @@ class AIWorkerEngine:
 # ===================================================================
 
 def _levenshtein_ops(ref_tokens: list[str], hyp_tokens: list[str]) -> tuple[int, int, int]:
-    """Compute substitutions, insertions, deletions via fast rapidfuzz or exact Levenshtein DP."""
+    """Compute substitutions, insertions, deletions via fast rapidfuzz, jiwer or exact Levenshtein DP."""
     n, m = len(ref_tokens), len(hyp_tokens)
     if n == 0:
         return 0, m, 0
@@ -275,28 +281,112 @@ def _levenshtein_ops(ref_tokens: list[str], hyp_tokens: list[str]) -> tuple[int,
     except ImportError:
         pass
 
-    # Fallback to exact Levenshtein DP (since SciPy linear assignment reduces calls to only 32 times, exact DP is extremely fast)
-    dp = [[(0, 0, 0, 0)] * (m + 1) for _ in range(n + 1)]
+    # Try jiwer next (highly optimized C-based engine, usually present)
+    try:
+        import jiwer
+        ref_str = " ".join(ref_tokens)
+        hyp_str = " ".join(hyp_tokens)
+        measures = jiwer.compute_measures(ref_str, hyp_str)
+        return measures["substitutions"], measures["insertions"], measures["deletions"]
+    except ImportError:
+        pass
+
+    # Guard: If the search space is too large and we have no C-based engine,
+    # fallback to difflib.SequenceMatcher instead of hanging the process for hours.
+    if n * m > 5000000:
+        import difflib
+        matcher = difflib.SequenceMatcher(None, ref_tokens, hyp_tokens)
+        subs = ins = dels = 0
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == 'replace':
+                n_ref = i2 - i1
+                n_hyp = j2 - j1
+                subs += min(n_ref, n_hyp)
+                if n_ref > n_hyp:
+                    dels += (n_ref - n_hyp)
+                elif n_hyp > n_ref:
+                    ins += (n_hyp - n_ref)
+            elif tag == 'insert':
+                ins += (j2 - j1)
+            elif tag == 'delete':
+                dels += (i2 - i1)
+        return subs, ins, dels
+
+    # Fallback to exact Levenshtein DP with O(M) memory to prevent RAM spikes (highly optimized)
+    previous_row = [(j, 0, j, 0) for j in range(m + 1)]  # (cost, subs, ins, dels)
+    current_row = [(0, 0, 0, 0)] * (m + 1)
     for i in range(1, n + 1):
-        dp[i][0] = (i, 0, 0, i)
-    for j in range(1, m + 1):
-        dp[0][j] = (j, 0, j, 0)
-    for i in range(1, n + 1):
+        current_row[0] = (i, 0, 0, i)
+        ref_tok = ref_tokens[i - 1]
         for j in range(1, m + 1):
-            if ref_tokens[i - 1] == hyp_tokens[j - 1]:
-                dp[i][j] = dp[i - 1][j - 1]
+            hyp_tok = hyp_tokens[j - 1]
+            if ref_tok == hyp_tok:
+                current_row[j] = previous_row[j - 1]
             else:
-                sub = dp[i - 1][j - 1]
-                ins = dp[i][j - 1]
-                dl = dp[i - 1][j]
-                candidates = [
-                    (sub[0] + 1, sub[1] + 1, sub[2], sub[3]),       # substitution
-                    (ins[0] + 1, ins[1], ins[2] + 1, ins[3]),       # insertion
-                    (dl[0] + 1, dl[1], dl[2], dl[3] + 1),           # deletion
-                ]
-                dp[i][j] = min(candidates, key=lambda x: x[0])
-    _, subs, ins, dels = dp[n][m]
+                sub = previous_row[j - 1]
+                ins = current_row[j - 1]
+                dl = previous_row[j]
+                
+                c_sub = sub[0] + 1
+                c_ins = ins[0] + 1
+                c_dl = dl[0] + 1
+                
+                if c_ins < c_dl:
+                    if c_ins < c_sub:
+                        current_row[j] = (c_ins, ins[1], ins[2] + 1, ins[3])
+                    else:
+                        current_row[j] = (c_sub, sub[1] + 1, sub[2], sub[3])
+                else:
+                    if c_dl < c_sub:
+                        current_row[j] = (c_dl, dl[1], dl[2], dl[3] + 1)
+                    else:
+                        current_row[j] = (c_sub, sub[1] + 1, sub[2], sub[3])
+        # Swap
+        previous_row, current_row = current_row, previous_row
+    _, subs, ins, dels = previous_row[m]
     return subs, ins, dels
+
+
+def _levenshtein_distance_only(s: list[str], t: list[str]) -> int:
+    """Compute exact Levenshtein distance using O(min(N, M)) memory to prevent RAM exhaustion."""
+    if len(s) < len(t):
+        return _levenshtein_distance_only(t, s)
+    if len(t) == 0:
+        return len(s)
+
+    # Try rapidfuzz first (extremely fast C++ implementation)
+    try:
+        from rapidfuzz.distance import Levenshtein
+        return Levenshtein.distance(s, t)
+    except ImportError:
+        pass
+
+    # Try jiwer next
+    try:
+        import jiwer
+        ref_str = " ".join(s)
+        hyp_str = " ".join(t)
+        measures = jiwer.compute_measures(ref_str, hyp_str)
+        return measures["substitutions"] + measures["insertions"] + measures["deletions"]
+    except ImportError:
+        pass
+
+    # Fallback to O(M) memory-efficient exact DP (highly optimized CPU loop)
+    previous_row = list(range(len(t) + 1))
+    current_row = [0] * (len(t) + 1)
+    for c1 in s:
+        current_row[0] = previous_row[0] + 1
+        for j, c2 in enumerate(t):
+            ins = previous_row[j + 1] + 1
+            dels = current_row[j] + 1
+            sub = previous_row[j] + (c1 != c2)
+            
+            if ins < dels:
+                current_row[j + 1] = ins if ins < sub else sub
+            else:
+                current_row[j + 1] = dels if dels < sub else sub
+        previous_row, current_row = current_row, previous_row
+    return previous_row[-1]
 
 
 @dataclass
@@ -391,6 +481,20 @@ def compute_cpwer(
 
     best_mapping = {}
 
+    # Filter hypothesis speakers to speed up Hungarian assignment cost matrix computation.
+    # Transient/noisy speakers have very low word counts, whereas the true speakers
+    # contain the vast majority of the transcript.
+    hyp_word_counts = {spk: len(hyp_text_by_spk[spk].split()) for spk in hyp_speakers}
+    sorted_hyp_by_words = sorted(hyp_speakers, key=lambda spk: hyp_word_counts[spk], reverse=True)
+    
+    # Keep the top 8 speakers by word count, plus any speaker with at least 50 words
+    promising_hyp_speakers = []
+    for idx, spk in enumerate(sorted_hyp_by_words):
+        if idx < 8 or hyp_word_counts[spk] >= 50:
+            promising_hyp_speakers.append(spk)
+            
+    promising_set = set(promising_hyp_speakers)
+
     try:
         from scipy.optimize import linear_sum_assignment
         N_ref = len(ref_speakers)
@@ -409,8 +513,11 @@ def compute_cpwer(
             ref_tokens = ref_text_by_spk[ref_spk].lower().split()
             for j, hyp_spk in enumerate(padded_hyp_speakers):
                 hyp_tokens = hyp_text_by_spk.get(hyp_spk, "").lower().split()
-                subs, ins, dels = _levenshtein_ops(ref_tokens, hyp_tokens)
-                cost_matrix[i, j] = subs + ins + dels
+                if hyp_spk in promising_set:
+                    cost_matrix[i, j] = _levenshtein_distance_only(ref_tokens, hyp_tokens)
+                else:
+                    # Non-promising speaker: assign max cost without running expensive Levenshtein DP
+                    cost_matrix[i, j] = len(ref_tokens) + len(hyp_tokens)
                 
         row_ind, col_ind = linear_sum_assignment(cost_matrix)
         for r, c in zip(row_ind, col_ind):
@@ -670,6 +777,7 @@ def evaluate_session(
                 chunk_np_int16 = np.frombuffer(chunk_bytes, dtype=np.int16)
                 chunk_f32 = chunk_np_int16.astype(np.float32) / 32768.0
                 
+                tensor = None
                 if sr != 16000:
                     tensor = torch.from_numpy(chunk_f32).unsqueeze(0)
                     tensor = torchaudio.functional.resample(tensor, orig_freq=sr, new_freq=16000)
@@ -701,6 +809,18 @@ def evaluate_session(
                 chunk_buffer_bytes = []
                 silence_counter = 0
                 has_spoken = False
+                
+                # Reset VAD engine Silero VAD state (RNN states)
+                if hasattr(vad_engine, "silero_model") and hasattr(vad_engine.silero_model, "reset_states"):
+                    vad_engine.silero_model.reset_states()
+                
+                # Free CPU/GPU memory immediately
+                if tensor is not None:
+                    del tensor
+                del chunk_bytes
+                del chunk_np_int16
+                del chunk_f32
+                
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
