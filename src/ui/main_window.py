@@ -65,6 +65,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 "tray_recording_message": "Kayıt başladı. Kontrol panelini açmak için tepsideki simgeye çift tıklayın.",
                 "lang_en": "İngilizce",
                 "lang_tr": "Türkçe",
+                "lang_de": "Almanca",
+                "lang_fr": "Fransızca",
+                "lang_es": "İspanyolca",
+                "lang_it": "İtalyanca",
+                "lang_ru": "Rusça",
+                "lang_ar": "Arapça",
+                "lang_zh": "Çince",
+                "lang_ja": "Japonca",
+                "lang_ko": "Korece",
+                "lang_nl": "Hollandaca",
+                "lang_pt": "Portekizce",
                 "analyzing": "Çözümleniyor...",
                 "live_prefix": "[Canlı] "
             },
@@ -94,10 +105,37 @@ class MainWindow(QtWidgets.QMainWindow):
                 "tray_recording_message": "Recording started. Double-click the tray icon to open the control panel.",
                 "lang_en": "English",
                 "lang_tr": "Turkish",
+                "lang_de": "German",
+                "lang_fr": "French",
+                "lang_es": "Spanish",
+                "lang_it": "Italian",
+                "lang_ru": "Russian",
+                "lang_ar": "Arabic",
+                "lang_zh": "Chinese",
+                "lang_ja": "Japanese",
+                "lang_ko": "Korean",
+                "lang_nl": "Dutch",
+                "lang_pt": "Portuguese",
                 "analyzing": "Resolving...",
                 "live_prefix": "[Live] "
             }
         }
+        
+        self.POPULAR_LANGUAGES = [
+            ("en", "lang_en"),
+            ("tr", "lang_tr"),
+            ("de", "lang_de"),
+            ("fr", "lang_fr"),
+            ("es", "lang_es"),
+            ("it", "lang_it"),
+            ("ru", "lang_ru"),
+            ("ar", "lang_ar"),
+            ("zh", "lang_zh"),
+            ("ja", "lang_ja"),
+            ("ko", "lang_ko"),
+            ("nl", "lang_nl"),
+            ("pt", "lang_pt"),
+        ]
         
         system_locale = QtCore.QLocale.system().name()
         self.ui_lang = "tr" if system_locale.startswith("tr") else "en"
@@ -267,8 +305,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lang_container_layout.setSpacing(8)
         
         self.source_lang_combo = QtWidgets.QComboBox(self.lang_container)
-        self.source_lang_combo.addItem("İngilizce", "en")
-        self.source_lang_combo.addItem("Türkçe", "tr")
         self.source_lang_combo.setMinimumHeight(36)
         
         arrow_label = QtWidgets.QLabel("➔", self.lang_container)
@@ -276,13 +312,31 @@ class MainWindow(QtWidgets.QMainWindow):
         arrow_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         
         self.target_lang_combo = QtWidgets.QComboBox(self.lang_container)
-        self.target_lang_combo.addItem("Türkçe", "tr")
-        self.target_lang_combo.addItem("İngilizce", "en")
         self.target_lang_combo.setMinimumHeight(36)
-        
+
         self.lang_container_layout.addWidget(self.source_lang_combo, 1)
         self.lang_container_layout.addWidget(arrow_label)
         self.lang_container_layout.addWidget(self.target_lang_combo, 1)
+        
+        # Add popular languages to combos
+        for code, trans_key in self.POPULAR_LANGUAGES:
+            self.source_lang_combo.addItem(code, code)
+            self.target_lang_combo.addItem(code, code)
+
+        from src.config import WHISPER_LANGUAGE
+        # Set default source language from config
+        idx_src = self.source_lang_combo.findData(WHISPER_LANGUAGE)
+        if idx_src >= 0:
+            self.source_lang_combo.setCurrentIndex(idx_src)
+        else:
+            idx_en = self.source_lang_combo.findData("en")
+            if idx_en >= 0:
+                self.source_lang_combo.setCurrentIndex(idx_en)
+
+        # Set default target language
+        idx_tgt = self.target_lang_combo.findData(self.ui_lang)
+        if idx_tgt >= 0:
+            self.target_lang_combo.setCurrentIndex(idx_tgt)
         
         self.settings_layout.addWidget(self.lang_label, 3, 0)
         self.settings_layout.addWidget(self.lang_container, 3, 1, 1, 2)
@@ -845,11 +899,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lang_label.setText(trans["audio_translation"])
         self.ui_lang_label.setText(trans["ui_language"])
         
-        self.source_lang_combo.setItemText(0, trans["lang_en"])
-        self.source_lang_combo.setItemText(1, trans["lang_tr"])
-        
-        self.target_lang_combo.setItemText(0, trans["lang_tr"])
-        self.target_lang_combo.setItemText(1, trans["lang_en"])
+        for index, (code, trans_key) in enumerate(self.POPULAR_LANGUAGES):
+            self.source_lang_combo.setItemText(index, trans[trans_key])
+            self.target_lang_combo.setItemText(index, trans[trans_key])
         
         self.show_overlay_cb.setText(trans["show_overlay"])
         self.click_through_cb.setText(trans["click_through"])

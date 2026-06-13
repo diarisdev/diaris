@@ -26,7 +26,7 @@ class AudioProcessApp(ctk.CTk):
         self.main_frame = ctk.CTkFrame(self)
         self.main_frame.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
 
-        self.main_frame.grid_rowconfigure(2, weight=1)
+        self.main_frame.grid_rowconfigure(3, weight=1)
         self.main_frame.grid_columnconfigure(0, weight=1)
 
         # --- Cihaz Seçimi ---
@@ -57,9 +57,71 @@ class AudioProcessApp(ctk.CTk):
         )
         self.refresh_btn.pack(side="left", padx=(0, 10))
 
+        # --- Dil Seçimi ---
+        self.lang_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.lang_frame.grid(row=1, column=0, padx=10, pady=(10, 0), sticky="ew")
+
+        lang_label = ctk.CTkLabel(
+            self.lang_frame,
+            text="Dil / Çeviri:",
+            font=ctk.CTkFont(size=13),
+        )
+        lang_label.pack(side="left", padx=(10, 5))
+
+        self.languages_dict = {
+            "İngilizce": "en",
+            "Türkçe": "tr",
+            "Almanca": "de",
+            "Fransızca": "fr",
+            "İspanyolca": "es",
+            "İtalyanca": "it",
+            "Rusça": "ru",
+            "Arapça": "ar",
+            "Çince": "zh",
+            "Japonca": "ja",
+            "Korece": "ko",
+            "Hollandaca": "nl",
+            "Portekizce": "pt"
+        }
+        self.lang_names = list(self.languages_dict.keys())
+
+        self.source_lang_combo = ctk.CTkComboBox(
+            self.lang_frame,
+            state="readonly",
+            width=150,
+            values=self.lang_names,
+            font=ctk.CTkFont(size=12),
+        )
+        self.source_lang_combo.pack(side="left", padx=5)
+
+        from .config import WHISPER_LANGUAGE
+        default_src_name = "İngilizce"
+        for name, code in self.languages_dict.items():
+            if code == WHISPER_LANGUAGE:
+                default_src_name = name
+                break
+        self.source_lang_combo.set(default_src_name)
+
+        arrow_label = ctk.CTkLabel(
+            self.lang_frame,
+            text="➔",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        arrow_label.pack(side="left", padx=5)
+
+        self.target_lang_combo = ctk.CTkComboBox(
+            self.lang_frame,
+            state="readonly",
+            width=150,
+            values=self.lang_names,
+            font=ctk.CTkFont(size=12),
+        )
+        self.target_lang_combo.pack(side="left", padx=5)
+        self.target_lang_combo.set("Türkçe")
+
         # --- Üst Panel (Durum ve Butonlar) ---
         self.top_panel = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.top_panel.grid(row=1, column=0, padx=10, pady=10, sticky="ew")
+        self.top_panel.grid(row=2, column=0, padx=10, pady=10, sticky="ew")
 
         self.status_label = ctk.CTkLabel(
             self.top_panel,
@@ -93,7 +155,7 @@ class AudioProcessApp(ctk.CTk):
             font=ctk.CTkFont(family="Consolas", size=14),
             wrap="word",
         )
-        self.textbox.grid(row=2, column=0, padx=10, pady=10, sticky="nsew")
+        self.textbox.grid(row=3, column=0, padx=10, pady=10, sticky="nsew")
         self.textbox.insert("0.0", "Yapay zeka sonuçları burada görünecek...\n\n")
 
         # Arka plan thread değişkenleri
@@ -236,6 +298,8 @@ class AudioProcessApp(ctk.CTk):
         self.stop_btn.configure(state="normal")
         self.device_combo.configure(state="disabled")
         self.refresh_btn.configure(state="disabled")
+        self.source_lang_combo.configure(state="disabled")
+        self.target_lang_combo.configure(state="disabled")
 
         self.finalized_segments = []
         self.textbox.configure(state="normal")
@@ -257,6 +321,10 @@ class AudioProcessApp(ctk.CTk):
                 "on_transcription": self.on_transcription,
                 "on_speaker_update": self.on_speaker_update,
                 "device_index": device_index,
+                "get_lang_pair": lambda: (
+                    self.languages_dict.get(self.source_lang_combo.get(), "en"),
+                    self.languages_dict.get(self.target_lang_combo.get(), "tr")
+                )
             },
             daemon=True,
         )
@@ -275,3 +343,5 @@ class AudioProcessApp(ctk.CTk):
             self.start_btn.configure(state="normal")
             self.device_combo.configure(state="readonly")
             self.refresh_btn.configure(state="normal")
+            self.source_lang_combo.configure(state="readonly")
+            self.target_lang_combo.configure(state="readonly")
