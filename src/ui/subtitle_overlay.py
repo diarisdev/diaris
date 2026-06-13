@@ -1,7 +1,7 @@
 import re
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from ..models.speaker_palette import color_for_speaker, display_name
+from ..model_folder.speaker_palette import color_for_speaker, display_name
 
 
 class ResizeGrip(QtWidgets.QSizeGrip):
