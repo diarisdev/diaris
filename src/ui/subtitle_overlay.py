@@ -1,6 +1,8 @@
 import re
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from ..models.speaker_palette import color_for_speaker, display_name
+
 
 class ResizeGrip(QtWidgets.QSizeGrip):
     def __init__(self, parent=None):
@@ -162,44 +164,50 @@ class SubtitleOverlay(QtWidgets.QWidget):
                 self.resize_grip.setToolTip(self.TRANSLATIONS[lang]["resize_tooltip"])
             self.render_subtitles()
 
+    # Overlay'de aynı anda gösterilecek en fazla konuşmacı satırı sayısı
+    MAX_VISIBLE_LINES = 3
+
     def update_subtitles(self, finalized_segments, partial_text):
-        """Yeni altyazıları kabul eder ve arayüzde gösterir."""
-        # Son 2 kesinleşmiş segmenti gösterelim
+        """Yeni altyazıları kabul eder ve arayüzde gösterir.
+
+        Bir chunk artık BİRDEN ÇOK konuşmacı satırı içerebilir (diarization
+        cümleyi konuşmacı sınırından böler → "[SPEAKER_00] ...\n[SPEAKER_01] ...").
+        Bu yüzden her finalize segmenti satır satır ayrıştırıp her satırı kendi
+        konuşmacı rengiyle ayrı bir satır olarak gösteriyoruz. Renkler ortak
+        speaker_palette'ten gelir → tüm bileşenlerle tutarlı.
+        """
         self.segments = []
-        
-        # Renk paleti (Dinamik ve yumuşak renkler)
-        colors = ["#3498db", "#2ecc71", "#e74c3c", "#f1c40f", "#9b59b6", "#1abc9c", "#e67e22"]
-        
-        for idx, text in enumerate(finalized_segments[-2:]):
-            speaker_tag = ""
-            content = text
-            
-            # Match formats: "[SPEAKER_00] 1.2s - 3.4s: Hello" or "[[Calibrating... 35s]] 0.0s - 10.0s: Hello"
-            match = re.match(r"^\[(.*)\] \d+\.\d+s\s+-\s+\d+\.\d+s:\s+(.*)$", text)
-            if match:
-                spk = match.group(1).strip()
-                content = match.group(2).strip()
-                
-                # If nested brackets (e.g. [Calibrating... 35s]), strip the outer brackets
-                if spk.startswith("[") and spk.endswith("]"):
-                    spk = spk[1:-1].strip()
-                speaker_tag = spk
-            
-            # Konuşmacıya göre renk atama
-            spk_id = 0
-            if "SPEAKER_" in speaker_tag:
-                try:
-                    spk_id = int(speaker_tag.split("_")[1])
-                except Exception:
-                    pass
-            color = colors[spk_id % len(colors)]
-            
+
+        line_re = re.compile(r"^\[(.*)\] \d+\.\d+s\s+-\s+\d+\.\d+s:\s+(.*)$")
+
+        parsed_lines = []
+        for text in finalized_segments:
+            if not text:
+                continue
+            for line in text.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                speaker_tag = ""
+                content = line
+                match = line_re.match(line)
+                if match:
+                    spk = match.group(1).strip()
+                    content = match.group(2).strip()
+                    # İç içe parantez (örn. [Calibrating... 35s]) → dış parantezi soy
+                    if spk.startswith("[") and spk.endswith("]"):
+                        spk = spk[1:-1].strip()
+                    speaker_tag = spk
+                parsed_lines.append((speaker_tag, content))
+
+        # Yalnızca en son N konuşmacı satırını göster
+        for speaker_tag, content in parsed_lines[-self.MAX_VISIBLE_LINES:]:
             self.segments.append({
-                "speaker": speaker_tag,
+                "speaker": display_name(speaker_tag) if speaker_tag else "",
                 "text": content,
-                "color": color
+                "color": color_for_speaker(speaker_tag),
             })
-            
+
         self.partial_text = partial_text
         self.render_subtitles()
 
