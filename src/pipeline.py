@@ -60,7 +60,7 @@ def _emit_status(message: str, on_status_change=None) -> None:
         on_status_change(message)
 
 
-def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None):
+def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None, translation_engine=None):
     """Process queued diarization tasks in the background."""
     while True:
         task = diarization_queue.get()
@@ -73,11 +73,26 @@ def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None):
             sample_rate = task["sample_rate"]
             chunk_duration_ms = task["chunk_duration_ms"]
             transcribed_segments = task["transcribed_segments"]
+            source_lang = task.get("source_lang")
+            target_lang = task.get("target_lang")
+            is_translation_needed = task.get("is_translation_needed", False)
 
-            # Run Pyannote diarization in background
+            # Run Pyannote diarization in background.
+            # Sonuç: konuşmacıya göre bölünmüş, ÇEVRİLMEMİŞ segmentler.
             results = ai_worker.run_diarization(
                 waveform_16k, sample_rate, chunk_duration_ms, transcribed_segments
             )
+
+            # Çeviri: konuşmacı sınırından bölme SONRASI. TÜM segmentler TEK batch
+            # çağrısında çevrilir — segment başına ayrı çağrı (özellikle yerel CPU
+            # NLLB'de) diarization kuyruğunu birden çok inference ile dondururuyordu.
+            if is_translation_needed and translation_engine and results:
+                texts = [r.get("text") or "" for r in results]
+                translated = translation_engine.translate_many(
+                    texts, source_lang, target_lang
+                )
+                for r, t in zip(results, translated):
+                    r["text"] = t
 
             # Format and send update
             formatted_str = format_results(results, return_str=True)
@@ -146,6 +161,11 @@ def _worker_loop(audio_queue, diarization_queue, ai_worker, translation_engine, 
 
             results = output.get("results", [])
 
+            # Orijinal (çevrilmemiş) per-segment sonuçları kelime damgalarıyla
+            # birlikte sakla — diarization aşamasında konuşmacı sınırından bölme
+            # ve doğru konuşmacıya çeviri için kullanılır.
+            original_segments = [dict(r) for r in results]
+
             # Combine all results into a single segment for better translation context and cleaner UI
             if results:
                 combined_text = " ".join(r["text"].strip() for r in results).strip()
@@ -160,6 +180,8 @@ def _worker_loop(audio_queue, diarization_queue, ai_worker, translation_engine, 
                 }]
 
             # Translate synchronously in ASR background thread (extremely fast, ~30ms)
+            # NOT: Bu yalnızca ANLIK gösterim içindir. Diarization aşaması çeviriyi
+            # konuşmacıya göre bölünmüş segmentler üzerinde yeniden yapar.
             if is_translation_needed and translation_engine and results:
                 for r in results:
                     if r.get("text"):
@@ -178,13 +200,19 @@ def _worker_loop(audio_queue, diarization_queue, ai_worker, translation_engine, 
                     else:
                         print("\n" + formatted_str + "\n")
 
-                # Queue for background diarization (results are already translated)
+                # Queue for background diarization.
+                # Çevrilmemiş per-segment (kelime damgalı) sonuçları gönderiyoruz;
+                # çeviri, konuşmacıya göre bölme sonrası diarization thread'inde
+                # yapılır. Dil çifti enqueue anında sabitlenir (yarış önleme).
                 diarization_queue.put({
                     "segment_index": segment_index,
                     "waveform_16k": output["waveform_16k"],
                     "sample_rate": output["sample_rate"],
                     "chunk_duration_ms": output["chunk_duration_ms"],
-                    "transcribed_segments": results
+                    "transcribed_segments": original_segments,
+                    "source_lang": source_lang,
+                    "target_lang": target_lang,
+                    "is_translation_needed": is_translation_needed,
                 })
                 segment_index += 1
             else:
@@ -351,7 +379,7 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
 
         diarization_thread = threading.Thread(
             target=_diarization_loop,
-            args=(diarization_queue, ai_worker, on_speaker_update),
+            args=(diarization_queue, ai_worker, on_speaker_update, translation_engine),
             daemon=True,
         )
         diarization_thread.start()
