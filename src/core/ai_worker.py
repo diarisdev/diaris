@@ -37,14 +37,21 @@ from ..config import (
     DEFAULT_RATE, DEFAULT_CHANNELS, WHISPER_LANGUAGE,
     DIARIZATION_EMBEDDING_THRESHOLD, DIARIZATION_WARMUP_MS,
     CANDIDATE_CONFIRMATIONS_NEEDED, CANDIDATE_TTL, CANDIDATE_SELF_SIMILARITY,
+    MIN_NEW_SPEAKER_DURATION,
 )
 from ..audio.utils import calculate_chunk_duration_ms
+from .diarization_utils import assign_words_to_speakers
 
 logger = logging.getLogger(__name__)
 
 # Minimum embedding requirements
 MIN_SPEECH_DURATION_FOR_EMBEDDING = 1.5  # saniye — embedding için min konuşma süresi
 MIN_AUDIO_RMS_FOR_EMBEDDING = 0.01       # min RMS enerji — sessizliği filtrele
+# Perf: embedding için konuşmacı başına kullanılacak max ses süresi. Daha uzun
+# ses embedding kalitesini kayda değer artırmaz ama Silero VAD'in Python döngüsü
+# ve embedding inference maliyetini (özellikle uzun chunk'larda) şişirir.
+MAX_EMBED_AUDIO_SEC = 6.0
+# (assign_words_to_speakers diarization_utils modülüne taşındı)
 
 
 def load_silero_vad():
@@ -278,7 +285,49 @@ class SpeakerTracker:
             if (self._chunk_counter - c["created_at"]) < self.CANDIDATE_TTL
         ]
 
-    def map_speakers(self, embeddings_dict):
+    def _merge_similar_speakers(self, merge_threshold=0.85):
+        """
+        Birbirine çok benzeyen bilinen konuşmacıları birleştirir.
+
+        Warm-up clustering (veya canlı faz) aynı kişiyi yanlışlıkla iki ayrı
+        konuşmacıya bölmüş olabilir; üstelik warm-up'ta belirlenen sayı kalıcı.
+        Bu güvenlik ağı, centroid'leri merge_threshold'u aşan konuşmacıları
+        tek etikete indirir (düşük id'li korunur), böylece şişen sayı zamanla
+        kendiliğinden düzelir.
+
+        Returns:
+            dict: {silinen_etiket: korunan_etiket} — çağıran, mevcut chunk'ın
+                  eşlemesini de bu remap'le güncelleyebilir.
+        """
+        remap = {}
+        labels = sorted(self.known_speakers.keys())  # SPEAKER_00 < SPEAKER_01 ...
+        i = 0
+        while i < len(labels):
+            keep = labels[i]
+            j = i + 1
+            while j < len(labels):
+                drop = labels[j]
+                if keep in self.known_speakers and drop in self.known_speakers:
+                    sim = torch.nn.functional.cosine_similarity(
+                        self.known_speakers[keep].unsqueeze(0),
+                        self.known_speakers[drop].unsqueeze(0),
+                    ).item()
+                    if sim >= merge_threshold:
+                        centroid = (self.known_speakers[keep] + self.known_speakers[drop]) / 2.0
+                        norm = torch.norm(centroid)
+                        if norm > 0:
+                            centroid = centroid / norm
+                        self.known_speakers[keep] = centroid
+                        del self.known_speakers[drop]
+                        remap[drop] = keep
+                        labels.pop(j)
+                        print(f"  [Merge] {drop} → {keep} (sim: {sim:.3f})")
+                        continue
+                j += 1
+            i += 1
+        return remap
+
+    def map_speakers(self, embeddings_dict, quality_dict=None):
         """
         Embedding'lere göre konuşmacıları eşler (warm-up sonrası).
         Confidence-weighted baseline güncelleme yapar.
@@ -286,16 +335,24 @@ class SpeakerTracker:
 
         Args:
             embeddings_dict: {local_label: embedding_tensor}
+            quality_dict: {local_label: temiz_konuşma_süresi_sn} (opsiyonel).
+                Yalnızca süresi MIN_NEW_SPEAKER_DURATION'ı aşan "güvenilir"
+                embedding'ler yeni konuşmacı (aday) oluşturabilir. Kısa sesler
+                ("evet", "aynen öyle") en yakın mevcut konuşmacıya yapışır,
+                aday tamponuna hiç girmez.
 
         Returns:
             dict: {local_label: global_label}
         """
+        quality_dict = quality_dict or {}
         self._chunk_counter += 1
         self._expire_old_candidates()
         mapping = {}
 
         for local_label, emb in embeddings_dict.items():
             emb = emb.cpu()
+            duration = quality_dict.get(local_label, float("inf"))
+            is_reliable = duration >= MIN_NEW_SPEAKER_DURATION
 
             # Bilinen konuşmacılarla karşılaştır
             best_match = None
@@ -309,36 +366,42 @@ class SpeakerTracker:
                     best_score = score
                     best_match = global_label
 
-            margin = 0.15  # Uncertainty Zone margin
-
             if best_match and best_score >= self.threshold:
                 mapping[local_label] = best_match
 
-                # Confidence-weighted güncelleme
+                # Centroid drift'i önle: baseline'ı YALNIZCA yüksek güvende
+                # güncelle. Borderline eşleşmeler (0.70-0.85) centroid'i yavaşça
+                # "ortalama bir ses"e kaydırıp baskın konuşmacının herkese
+                # benzemesine yol açıyordu (AMI over-collapse). Artık sadece
+                # >0.85 skorlu, kesin eşleşmeler küçük bir adımla günceller.
                 if best_score > 0.85:
-                    alpha = 0.6
-                elif best_score > 0.70:
-                    alpha = 0.8
-                else:
-                    alpha = 0.95
+                    alpha = 0.8  # eski centroid ağırlığı (küçük hareket)
+                    self.known_speakers[best_match] = (
+                        alpha * self.known_speakers[best_match] + (1 - alpha) * emb
+                    )
+                    # Re-normalize baseline to prevent magnitude decay
+                    norm = torch.norm(self.known_speakers[best_match])
+                    if norm > 0:
+                        self.known_speakers[best_match] /= norm
 
-                self.known_speakers[best_match] = (
-                    alpha * self.known_speakers[best_match] + (1 - alpha) * emb
-                )
-                
-                # Re-normalize baseline to prevent magnitude decay
-                norm = torch.norm(self.known_speakers[best_match])
-                if norm > 0:
-                    self.known_speakers[best_match] /= norm
-
-            elif best_match and best_score >= (self.threshold - margin):
-                # Uncertainty Zone: Belirsiz ses. Yeni kişi uydurma, en yakın kişiye ata.
-                # Ancak baseline'ı kirletmemek için GÜNCELLEME YAPMA.
-                mapping[local_label] = best_match
-                print(f"  [Uncertain match] mapped to {best_match} (score: {best_score:.3f} < {self.threshold})")
+            elif not is_reliable:
+                # Bilinmeyen AMA kısa/güvenilmez ses → yeni konuşmacı YARATMA.
+                # En yakın mevcut konuşmacıya yapıştır (sticky). Bu, kısa
+                # cümlelerin ("evet") yeni konuşmacı doğurmasını engeller.
+                mapping[local_label] = best_match if best_match else "Unknown"
+                if best_match:
+                    print(f"  [Short utterance] sticky → {best_match} "
+                          f"(score: {best_score:.3f}, {duration:.1f}s)")
 
             else:
-                # Bilinmeyen ses — aday tamponuna ekle veya mevcut adayı onayla
+                # Bilinmeyen VE güvenilir (yeterince uzun) ses
+                # — aday tamponuna ekle veya mevcut adayı onayla.
+                # NOT: Eski "belirsizlik bandı" (threshold-0.15 ile threshold arası)
+                # bu sesleri zorla en yakın baskın konuşmacıya atıyordu ve farklı
+                # gerçek konuşmacıları yutuyordu. O dal kaldırıldı; eşik altındaki
+                # güvenilir sesler artık aday tamponundan geçip kendi konuşmacı
+                # etiketini oluşturabilir. Aday kapısı (CONFIRMATIONS=4,
+                # SELF_SIMILARITY=0.78) hayalet konuşmacıları yine de bastırır.
                 cand_idx = self._find_matching_candidate(emb)
 
                 if cand_idx >= 0:
@@ -368,6 +431,14 @@ class SpeakerTracker:
                     mapping[local_label] = best_match if best_match else "Unknown"
                     closest_info = f" (closest: {best_match}, score: {best_score:.3f})" if best_match else ""
                     print(f"  [Candidate] new candidate registered{closest_info}, mapped to {mapping[local_label]}")
+
+        # Şişen konuşmacı sayısını düzelt: birbirine çok benzeyen bilinenleri
+        # birleştir ve bu chunk'ın eşlemesini de remap'le güncelle.
+        remap = self._merge_similar_speakers()
+        if remap:
+            for local_label, glabel in mapping.items():
+                if glabel in remap:
+                    mapping[local_label] = remap[glabel]
 
         return mapping
 
@@ -638,12 +709,15 @@ class AIWorker:
         - Speech-only extraction (Silero VAD)
 
         Returns:
-            dict: {local_speaker_label: embedding_tensor}
+            tuple: (embeddings_dict, quality_dict)
+                embeddings_dict: {local_speaker_label: embedding_tensor}
+                quality_dict:    {local_speaker_label: temiz_konuşma_süresi_sn}
         """
         if self.embedding_model is None:
-            return {}
+            return {}, {}
 
         embeddings_dict = {}
+        quality_dict = {}
         unique_speakers = set(t["speaker"] for t in turns)
 
         for spk in unique_speakers:
@@ -672,12 +746,20 @@ class AIWorker:
             if rms_energy < MIN_AUDIO_RMS_FOR_EMBEDDING:
                 continue
 
+            # Perf cap: pahalı adımlardan (Silero VAD döngüsü + embedding) önce
+            # konuşmacı başına sesi MAX_EMBED_AUDIO_SEC ile sınırla.
+            max_samples = int(MAX_EMBED_AUDIO_SEC * 16000)
+            if spk_audio_raw.shape[0] > max_samples:
+                spk_audio_raw = spk_audio_raw[:max_samples]
+
             # 3. Speech-only extraction (sessizliği temizle)
             spk_audio_clean = self._extract_speech_only(spk_audio_raw)
 
             # Temizlenmiş ses hâlâ yeterli mi?
             if spk_audio_clean.shape[0] < int(MIN_SPEECH_DURATION_FOR_EMBEDDING * 16000):
                 continue
+
+            clean_duration_sec = spk_audio_clean.shape[0] / 16000
 
             # 4. Bandpass filter (konuşma frekansları)
             spk_waveform = self._apply_bandpass_filter(spk_audio_clean.unsqueeze(0))
@@ -700,13 +782,14 @@ class AIWorker:
                 emb_norm = torch.norm(emb_tensor)
                 if emb_norm > 0:
                     emb_tensor = emb_tensor / emb_norm
-                    
+
                 embeddings_dict[spk] = emb_tensor
+                quality_dict[spk] = clean_duration_sec
 
             except Exception as e:
                 print(f"  [Embedding] {spk}: {e}")
 
-        return embeddings_dict
+        return embeddings_dict, quality_dict
 
     def _get_chunk_duration_ms(self, chunk_bytes):
         """Chunk süresini ms cinsinden hesaplar."""
@@ -804,11 +887,21 @@ class AIWorker:
 
             results = []
             for segment in segments:
+                # Kelime-seviyesi zaman damgalarını sakla — diarization aşamasında
+                # konuşmacı sınırından bölme için kullanılır.
+                words = []
+                for w in (segment.words or []):
+                    words.append({
+                        "start": w.start,
+                        "end": w.end,
+                        "word": w.word,
+                    })
                 results.append({
                     "speaker": "Çözümleniyor...",
                     "start": segment.start,
                     "end": segment.end,
                     "text": segment.text,
+                    "words": words,
                 })
 
             return {
@@ -842,8 +935,11 @@ class AIWorker:
             for turn, _, speaker in diarization.itertracks(yield_label=True):
                 turns.append({"start": turn.start, "end": turn.end, "speaker": speaker})
 
-            # --- Embedding çıkar --
-            embeddings_dict = self._extract_speaker_embeddings(waveform_16k, turns) if turns else {}
+            # --- Embedding + kalite (süre) çıkar --
+            if turns:
+                embeddings_dict, quality_dict = self._extract_speaker_embeddings(waveform_16k, turns)
+            else:
+                embeddings_dict, quality_dict = {}, {}
 
             # --- Warm-up / Aktif faz ---
             if self.speaker_tracker.is_warming_up:
@@ -859,7 +955,7 @@ class AIWorker:
             else:
                 # Aktif faz: embedding-based konuşmacı eşleme
                 if turns and embeddings_dict:
-                    speaker_mapping = self.speaker_tracker.map_speakers(embeddings_dict)
+                    speaker_mapping = self.speaker_tracker.map_speakers(embeddings_dict, quality_dict)
                     for t in turns:
                         if t["speaker"] not in speaker_mapping:
                             speaker_mapping[t["speaker"]] = "Unknown"
@@ -872,27 +968,9 @@ class AIWorker:
             for turn in turns:
                 turn["speaker"] = speaker_mapping.get(turn["speaker"], turn["speaker"])
 
-            # Segmentleri konuşmacılarla eşle (overlap-based)
-            results = []
-            for segment in transcribed_segments:
-                best_speaker = "Unknown"
-                best_overlap = 0.0
-
-                for turn in turns:
-                    overlap_start = max(segment["start"], turn["start"])
-                    overlap_end = min(segment["end"], turn["end"])
-                    overlap = max(0.0, overlap_end - overlap_start)
-
-                    if overlap > best_overlap:
-                        best_overlap = overlap
-                        best_speaker = turn["speaker"]
-
-                results.append({
-                    "speaker": best_speaker,
-                    "start": segment["start"],
-                    "end": segment["end"],
-                    "text": segment["text"],
-                })
+            # Kelime-seviyesi atama + konuşmacı sınırında bölme.
+            # (Whisper segmenti A+B'yi birleştirmişse burada ayrılır.)
+            results = assign_words_to_speakers(transcribed_segments, turns)
 
             # Speaker label smoothing
             results = self._smooth_speaker_labels(results)
