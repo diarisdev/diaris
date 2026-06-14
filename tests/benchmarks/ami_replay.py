@@ -10,18 +10,12 @@ yerine dosyadan senkron besler. Her toplantı için hipotez çıktıları üreti
   hyp/transcripts/<meeting>.json  → cpWER + WER için (Faz 4)
   hyp_summary.json                → süre, RTF (compute), konuşmacı sayısı
 
-Yerleşim
---------
-Bu dosyayı paketin içine koyun, ör.  src/eval/replay.py  (yeni 'eval' alt-paketi,
-içine boş bir __init__.py ekleyin). Aşağıdaki göreli importlar buna göredir;
-farklı yere koyarsanız import yollarını siz ayarlarsınız.
-
-Çalıştırma (paket kökünün BİR ÜSTÜNDEN, modül olarak):
-    python -m src.eval.replay
+Çalıştırma (proje kökünden, modül olarak):
+    python -m tests.benchmarks.ami_replay
     # veya belirli dizinleri belirterek:
-    python -m src.eval.replay --refs ./tests/ami_data/ami_refs --out ./tests/ami_data/ami_hyp
-    # tek toplantıda sağlama (Faz 5.18):
-    python -m src.eval.replay --only IS1009a
+    python -m tests.benchmarks.ami_replay --refs ./datasets/ami/ami_refs --out ./datasets/ami/ami_hyp
+    # tek toplantıda sağlama:
+    python -m tests.benchmarks.ami_replay --only IS1009a
 
 Mantık (pipeline.run() ile birebir)
 -----------------------------------
@@ -56,12 +50,22 @@ import numpy as np
 import soundfile as sf
 import torch
 
-# --- Paket içi göreli importlar (src/eval/replay.py varsayımı) ---
-from ..config import FRAME_DURATION_MS
-from ..audio.vad import VADEngine
-from ..core.ai_worker import AIWorker
-from .eval_worker import EvalAIWorker
-from ..pipeline import RecordingState, _update_recording_state, _flush_chunk_if_ready
+# --- Proje kökünü path'e ekle (python -m tests.benchmarks.ami_replay) ---
+import sys
+from pathlib import Path as _Path
+_ROOT = _Path(__file__).resolve().parents[2]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+# CUDA DLL'lerini (cublas/cudnn) model yüklemeden ÖNCE bulunur kıl (main.py gibi)
+from src.config import configure_cuda_dll_paths
+configure_cuda_dll_paths()
+
+from src.config import FRAME_DURATION_MS
+from src.audio.vad import VADEngine
+from src.core.ai_worker import AIWorker
+from tests.benchmarks._eval_worker import EvalAIWorker
+from src.pipeline import RecordingState, _update_recording_state, _flush_chunk_if_ready
 
 TARGET_RATE = 16000   # AMI ihm-mix zaten 16k mono
 TARGET_CH = 1
@@ -289,8 +293,8 @@ def process_meeting(worker: AIWorker, vad: VADEngine, audio_path: str,
 # --------------------------------------------------------------------------- #
 def main() -> None:
     PROJECT_ROOT = Path(__file__).resolve().parents[2]
-    default_refs = PROJECT_ROOT / "tests" / "ami_data" / "ami_refs"
-    default_out = PROJECT_ROOT / "tests" / "ami_data" / "ami_hyp"
+    default_refs = PROJECT_ROOT / "datasets" / "ami" / "ami_refs"
+    default_out = PROJECT_ROOT / "datasets" / "ami" / "ami_hyp"
 
     ap = argparse.ArgumentParser(description="AMI offline replay köprüsü.")
     ap.add_argument("--refs", type=Path, default=default_refs,
@@ -318,18 +322,18 @@ def main() -> None:
 
     meetings_file = args.refs / "meetings.json"
     if not meetings_file.exists():
-        # Kullanıcı elle göreli yol geçip bu dizini bulamadıysa tests/ami_data altından eşleştirmeye çalış
-        fallback_refs = PROJECT_ROOT / "tests" / "ami_data" / args.refs.name
+        # Kullanıcı elle göreli yol geçip bu dizini bulamadıysa datasets/ami altından eşleştirmeye çalış
+        fallback_refs = PROJECT_ROOT / "datasets" / "ami" / args.refs.name
         if (fallback_refs / "meetings.json").exists():
             print(f"[Info] '{args.refs}' doğrudan bulunamadı. '{fallback_refs}' konumundaki veriler kullanılacak.")
             args.refs = fallback_refs
             meetings_file = args.refs / "meetings.json"
             # Çıktı klasörünü de otomatik yönlendir
-            args.out = PROJECT_ROOT / "tests" / "ami_data" / args.out.name
+            args.out = PROJECT_ROOT / "datasets" / "ami" / args.out.name
         else:
             raise SystemExit(
                 f"Hata: meetings.json bulunamadı: {meetings_file.resolve()}\n"
-                f"Lütfen doğru '--refs' dizinini belirtin ya da verilerin tests/ami_data/ami_refs altında olduğundan emin olun."
+                f"Lütfen doğru '--refs' dizinini belirtin ya da verilerin datasets/ami/ami_refs altında olduğundan emin olun."
             )
 
     meetings = json.loads(meetings_file.read_text(encoding="utf-8"))
@@ -367,14 +371,14 @@ def main() -> None:
     for i_m, m in enumerate(meetings, 1):
         mid = m["meeting_id"]
 
-        # Ses dosyasının konumunu çöz (tests/ami_data altındaki yapıya göre)
+        # Ses dosyasının konumunu çöz (datasets/ami altındaki yapıya göre)
         audio_path_raw = m["audio_path"]
         audio_path = Path(audio_path_raw)
         if not audio_path.is_absolute():
             # Farklı aday konumları kontrol et
             candidate1 = args.refs.parent / audio_path
             candidate2 = args.refs / audio_path
-            candidate3 = PROJECT_ROOT / "tests" / "ami_data" / audio_path
+            candidate3 = PROJECT_ROOT / "datasets" / "ami" / audio_path
 
             if candidate1.exists():
                 audio_path = candidate1

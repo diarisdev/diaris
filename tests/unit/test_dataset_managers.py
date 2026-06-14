@@ -1,4 +1,4 @@
-from tests.dataset_manager import _parse_transcription_file, AmiDiarizationManager
+from tests.dataset_managers import _parse_transcription_file, AmiDiarizationManager
 
 
 def test_parse_transcription_file(tmp_path):

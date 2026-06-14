@@ -9,19 +9,78 @@ with ground-truth transcripts to calculate key conversational speech metrics:
 
 Supports multiple modes:
   - Close-talk (worn) microphones evaluation (ideal for system sanity checks)
-  - Far-field Kinect array evaluation (using single channels or multi-channel combinations)
+  - Far-field Kinect array evaluation (single channels or multi-channel combinations)
   - Oracle segmentation (Track 1) vs Continuous Streaming (Track 2)
-  - Multi-channel enhancement (Average combination, GSS fallback)
+  - Multi-channel enhancement (Average combination, Delay-and-Sum beamform, GSS)
 
-Usage:
-  # 1-minute Close-talk Sanity Check (Very Fast verification):
-  python -m tests.chime6_benchmark --sanity-check
+==============================================================================
+HOW TO RUN (terminal examples)
+==============================================================================
+Run as a module from the project root. Data is expected under
+datasets/chime6/audio/ and datasets/chime6/transcriptions/ by default.
 
-  # Full Close-talk (Worn) Oracle Segmentation:
-  python -m tests.chime6_benchmark --mode worn --segmentation oracle
+  # Fastest sanity check — 1 minute, close-talk, oracle segmentation:
+  python -m tests.benchmarks.chime6 --sanity-check
 
-  # Far-field Kinect Array (U01) with Channel Averaging & Streaming:
-  python -m tests.chime6_benchmark --mode far-field --array U01 --enhance average --segmentation streaming
+  # Full close-talk (worn) Track-1 run over ALL sessions, oracle boundaries:
+  python -m tests.benchmarks.chime6 --mode worn --segmentation oracle
+
+  # One session only, first 5 minutes (quick iteration while developing):
+  python -m tests.benchmarks.chime6 --session S02 --limit-minutes 5
+
+  # A single worn speaker in one session:
+  python -m tests.benchmarks.chime6 --session S02 --mode worn --worn-speaker P05
+
+  # Far-field, single Kinect array U01, single channel (no enhancement):
+  python -m tests.benchmarks.chime6 --mode far-field --array U01 --enhance none
+
+  # Far-field, multi-channel averaging of array U01, streaming (Track 2):
+  python -m tests.benchmarks.chime6 --mode far-field --array U01 \
+      --enhance average --segmentation streaming
+
+  # Far-field, Delay-and-Sum beamforming over two arrays:
+  python -m tests.benchmarks.chime6 --mode far-field --array U01,U02 --enhance beamform
+
+  # Far-field with pre-generated GSS audio (recommended for paper-comparable
+  # far-field numbers — see github.com/desh2608/gss):
+  python -m tests.benchmarks.chime6 --mode far-field --array U01 --enhance gss \
+      --segmentation streaming
+
+  # Paper-comparable cpWER via the meeteval reference implementation, save JSON:
+  python -m tests.benchmarks.chime6 --session S02 --meeteval --output output/s02.json
+
+  # Custom data locations + explicit log file + precise WER (jiwer):
+  python -m tests.benchmarks.chime6 --audio-dir D:/chime6/audio \
+      --trans-dir D:/chime6/transcriptions --jiwer --log output/run.log
+
+------------------------------------------------------------------------------
+ARGUMENT REFERENCE
+------------------------------------------------------------------------------
+  --session, -s        Session ID to evaluate (e.g. S02). Omit = all sessions.
+  --mode, -m           'worn' (close-talk mics) | 'far-field' (Kinect arrays).
+  --array              Far-field array(s): 'U01', 'U01,U02', or 'all'.
+  --enhance            'none' (single CH) | 'average' (multi-CH mean) |
+                       'beamform' (delay-and-sum) | 'gss' (pre-enhanced GSS).
+  --segmentation       'oracle' (Track 1, ground-truth boundaries) |
+                       'streaming' (Track 2, VAD + diarization + ASR).
+  --worn-speaker       Limit worn eval to one speaker ID (e.g. P05).
+  --limit-minutes, -l  Process only first N minutes of each session.
+  --jiwer              Use jiwer for precise WER (if installed).
+  --meeteval           Use meeteval's reference cpWER (pip install meeteval) so
+                       the cpWER number is directly comparable to CHiME-6/7/8.
+  --output, -o         Save full evaluation report to a JSON file.
+  --log                Path for the execution text log (default: output/...).
+  --audio-dir, -a      Override CHiME6 audio directory.
+  --trans-dir, -t      Override CHiME6 JSON transcripts directory.
+  --sanity-check       Shorthand for worn + oracle + 1 minute.
+
+Notes:
+  * Track 1 (oracle) headline metric is WER; Track 2 (streaming) is cpWER.
+  * Far-field without GSS ('none'/'average'/'beamform') does NOT separate
+    overlapping speakers and scores far worse than the ~51% WER CHiME-6
+    baseline; use '--enhance gss' for results comparable to the literature.
+  * For Track 2, run FULL sessions so the diarization warm-up is negligible;
+    short clips inflate cpWER/DER.
 """
 import warnings
 warnings.filterwarnings("ignore", message=".*pkg_resources.*")
@@ -46,8 +105,8 @@ import torchaudio
 import concurrent.futures
 from pathlib import Path
 
-# Add project root to sys.path
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Add project root to sys.path (tests/benchmarks/chime6.py -> 3 seviye yukarı)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
@@ -55,7 +114,12 @@ if PROJECT_ROOT not in sys.path:
 from src.config import configure_cuda_dll_paths
 configure_cuda_dll_paths()
 
-from tests.evaluator import TranscriptionEvaluator, DiarizationEvaluator
+from tests.metrics import TranscriptionEvaluator, DiarizationEvaluator, cpwer_from_segments
+from tests.dataset_managers import (
+    Chime6DatasetManager,
+    parse_time_to_seconds,
+    clean_chime6_text,
+)
 from src.audio.vad import VADEngine
 from src.core.ai_worker import AIWorker
 from src.config import (
@@ -102,62 +166,6 @@ def _get_process_memory_mb():
         except Exception:
             pass
     return 0.0
-
-
-def parse_time_to_seconds(t_val):
-    """
-    Parses timestamp to float seconds.
-    Supports float/int directly, string float seconds, and HH:MM:SS.mmm format.
-
-    CHiME-5/6 transcripts often store start_time/end_time as a dict keyed by
-    device, e.g. {"original": "0:01:20.12", "U01": "...", "P05": "..."}. After
-    CHiME-6 array synchronization all devices share one timeline, so we take the
-    'original' value if present, otherwise the first available one.
-    """
-    if isinstance(t_val, dict):
-        if "original" in t_val:
-            t_val = t_val["original"]
-        elif t_val:
-            t_val = next(iter(t_val.values()))
-        else:
-            raise ValueError("Empty time dict")
-
-    if isinstance(t_val, (int, float)):
-        return float(t_val)
-    
-    t_str = str(t_val).strip()
-    try:
-        return float(t_str)
-    except ValueError:
-        pass
-        
-    parts = t_str.split(':')
-    if len(parts) == 3:
-        h, m, s = parts
-        return float(h) * 3600 + float(m) * 60 + float(s)
-    elif len(parts) == 2:
-        m, s = parts
-        return float(m) * 60 + float(s)
-    else:
-        raise ValueError(f"Unknown time format: {t_val}")
-
-
-def clean_chime6_text(text):
-    """
-    Cleans CHiME6 text by removing bracketed non-speech tags (e.g. [noise], [laughs])
-    and double-dashes or punctuation to allow fair ASR comparison.
-    """
-    if not text:
-        return ""
-    # Remove bracketed tags like [noise], [laughter], [laughs], [sigh], etc.
-    text = re.sub(r'\[[^\]]*\]', '', text)
-    # Remove double dashes or hyphens
-    text = text.replace("-", " ")
-    # Replace non-alphanumeric chars (excluding spaces/apostrophes)
-    text = re.sub(r'[^\w\s\']', '', text)
-    # Remove extra spaces
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
 
 
 def delay_and_sum_beamforming(waveforms, sr=16000):
@@ -694,7 +702,13 @@ def run_streaming_evaluation(ai_worker, audio_paths, mode, enhance, limit_minute
                         chunk_buffer = []
                         silence_counter = 0
                         has_spoken = False
-                        
+
+                        # Reset the Silero VAD RNN state between chunks. Each chunk
+                        # is an independent utterance; leaking hidden state across
+                        # boundaries skews VAD decisions. (Ported from chime6_benchmark_new.)
+                        if hasattr(vad_engine.silero_model, "reset_states"):
+                            vad_engine.silero_model.reset_states()
+
         # Sort all collected segments chronologically
         hyp_segments.sort(key=lambda x: x["start"])
         return hyp_segments
@@ -808,7 +822,12 @@ def run_streaming_evaluation(ai_worker, audio_paths, mode, enhance, limit_minute
                 chunk_buffer = []
                 silence_counter = 0
                 has_spoken = False
-                
+
+                # Reset the Silero VAD RNN state between chunks (see worn path
+                # above). Ported from chime6_benchmark_new.
+                if hasattr(vad_engine.silero_model, "reset_states"):
+                    vad_engine.silero_model.reset_states()
+
         # Close all files
         for sf_file in sound_files:
             sf_file.close()
@@ -819,169 +838,6 @@ def run_streaming_evaluation(ai_worker, audio_paths, mode, enhance, limit_minute
         print_and_log(f"[OK] Processing complete in {eval_elapsed:.1f}s (RTF: {rtf:.3f}x)", log_file)
         
         return hyp_segments
-
-
-def compute_cpwer(ref_segments, hyp_segments, evaluator, use_meeteval=False):
-    """
-    Computes cpWER (concatenated minimum-permutation Word Error Rate).
-
-    1. Concatenates all reference text per speaker.
-    2. Concatenates all hypothesis text per speaker.
-    3. Finds the permutation matching hypothesis speakers to reference speakers that minimizes edit distance.
-    4. Calculates the word error rate over the matched pairs.
-
-    If use_meeteval=True and the `meeteval` package is installed, the headline
-    cpWER value is replaced by meeteval's reference implementation (the metric
-    used in CHiME-6/7/8), which makes the number directly comparable to the
-    literature. The internal computation is still used for the per-speaker
-    breakdown table.
-    """
-    # Group reference texts by speaker
-    ref_speaker_texts = {}
-    for seg in ref_segments:
-        spk = seg["speaker"]
-        ref_speaker_texts.setdefault(spk, []).append(seg)
-        
-    # Group hypothesis texts by speaker
-    hyp_speaker_texts = {}
-    for seg in hyp_segments:
-        spk = seg["speaker"]
-        if "Calibrating" in spk:  # ignore calibrating labels
-            continue
-        hyp_speaker_texts.setdefault(spk, []).append(seg)
-        
-    # Concatenate texts for each speaker chronologically
-    ref_concats = {}
-    for spk, segs in ref_speaker_texts.items():
-        sorted_segs = sorted(segs, key=lambda x: x["start"])
-        text = " ".join(evaluator.normalize_text(s["text"]) for s in sorted_segs)
-        ref_concats[spk] = evaluator.normalize_text(text)
-        
-    hyp_concats = {}
-    for spk, segs in hyp_speaker_texts.items():
-        sorted_segs = sorted(segs, key=lambda x: x["start"])
-        text = " ".join(evaluator.normalize_text(s["text"]) for s in sorted_segs)
-        hyp_concats[spk] = evaluator.normalize_text(text)
-        
-    ref_spks = list(ref_concats.keys())
-    hyp_spks = list(hyp_concats.keys())
-    
-    # Edge case: no speakers at all
-    if not ref_spks and not hyp_spks:
-        return 0.0, {}, {}
-        
-    K = len(ref_spks)
-    M = len(hyp_spks)
-    N = max(K, M)
-    
-    # Pad lists to N elements
-    ref_list = ref_spks + [None] * (N - K)
-    hyp_list = hyp_spks + [None] * (N - M)
-    
-    # Cost matrix for edit distances between all speaker pairs
-    cost_matrix = [[0] * N for _ in range(N)]
-    details_matrix = [[None] * N for _ in range(N)]
-    
-    for i in range(N):
-        ref_spk = ref_list[i]
-        ref_text = ref_concats[ref_spk] if ref_spk else ""
-        ref_words = ref_text.split()
-        
-        for j in range(N):
-            hyp_spk = hyp_list[j]
-            hyp_text = hyp_concats[hyp_spk] if hyp_spk else ""
-            hyp_words = hyp_text.split()
-            
-            sub, ins, dlt = evaluator._levenshtein_ops(ref_words, hyp_words)
-            cost = sub + ins + dlt
-            cost_matrix[i][j] = cost
-            details_matrix[i][j] = {
-                "sub": sub,
-                "ins": ins,
-                "del": dlt,
-                "ref_count": len(ref_words),
-                "hyp_count": len(hyp_words)
-            }
-            
-            # Simple progress bar for cpWER
-            current_step = i * N + j + 1
-            total_steps = N * N
-            prog = current_step / total_steps
-            bar_len = 20
-            filled = int(bar_len * prog)
-            bar = '█' * filled + '-' * (bar_len - filled)
-            sys.stdout.write(f"\r   [cpWER] [{bar}] {current_step}/{total_steps}")
-            sys.stdout.flush()
-            
-    print()  # Move to next line when done
-            
-    # Find best permutation minimizing total cost
-    try:
-        from scipy.optimize import linear_sum_assignment
-        row_ind, col_ind = linear_sum_assignment(cost_matrix)
-        best_perm = [0] * N
-        for r, c in zip(row_ind, col_ind):
-            best_perm[r] = c
-        best_cost = sum(cost_matrix[i][best_perm[i]] for i in range(N))
-    except ImportError:
-        # Fallback if scipy is not installed
-        if N <= 8:
-            best_cost = float('inf')
-            best_perm = None
-            for perm in itertools.permutations(range(N)):
-                cost = sum(cost_matrix[i][perm[i]] for i in range(N))
-                if cost < best_cost:
-                    best_cost = cost
-                    best_perm = perm
-        else:
-            best_perm = [-1] * N
-            matched_cols = set()
-            best_cost = 0
-            for i in range(N):
-                min_c = -1
-                min_val = float('inf')
-                for j in range(N):
-                    if j not in matched_cols and cost_matrix[i][j] < min_val:
-                        min_val = cost_matrix[i][j]
-                        min_c = j
-                best_perm[i] = min_c
-                matched_cols.add(min_c)
-                best_cost += min_val
-            
-    # Map speakers and compile details
-    mapping = {}
-    details = {}
-    total_ref_words = sum(len(ref_concats[spk].split()) for spk in ref_spks)
-    
-    for i in range(N):
-        ref_spk = ref_list[i]
-        hyp_spk = hyp_list[best_perm[i]]
-        
-        if ref_spk or hyp_spk:
-            r_name = ref_spk if ref_spk else "[None]"
-            h_name = hyp_spk if hyp_spk else "[No Match]"
-            mapping[r_name] = h_name
-            details[r_name] = details_matrix[i][best_perm[i]]
-            
-    cpwer = best_cost / total_ref_words if total_ref_words > 0 else 0.0
-
-    # Optionally override with meeteval's reference cpWER implementation so the
-    # number is directly comparable to CHiME-6/7/8 published results.
-    if use_meeteval and ref_concats:
-        try:
-            from meeteval.wer import cp_word_error_rate
-            # meeteval accepts a speaker -> transcript mapping for cpWER.
-            ref_map = {spk: ref_concats[spk] for spk in ref_spks}
-            hyp_map = {spk: hyp_concats[spk] for spk in hyp_spks} or {"dummy": ""}
-            er = cp_word_error_rate(ref_map, hyp_map)
-            cpwer = float(er.error_rate)
-        except ImportError:
-            print("WARNING: --meeteval requested but `meeteval` is not installed "
-                  "(pip install meeteval). Falling back to internal cpWER.")
-        except Exception as e:
-            print(f"WARNING: meeteval cpWER failed ({e}). Falling back to internal cpWER.")
-
-    return cpwer, mapping, details
 
 
 def run_chime6_session(audio_dir, transcript_path, mode, array="U01", enhance="none",
@@ -1110,9 +966,9 @@ def run_chime6_session(audio_dir, transcript_path, mode, array="U01", enhance="n
         duration=actual_duration
     )
     
-    # cpWER Evaluation
-    cpwer, mapping, details = compute_cpwer(ref_segments, clean_hyp_segments, trans_eval,
-                                            use_meeteval=use_meeteval)
+    # cpWER Evaluation (ortak tests.metrics çekirdeği)
+    _cp = cpwer_from_segments(ref_segments, clean_hyp_segments, use_meeteval=use_meeteval)
+    cpwer, mapping, details = _cp.cpwer, _cp.mapping, _cp.details
     
     # Diarization DER Evaluation (Only applicable to streaming segmentation)
     der = 0.0
@@ -1223,8 +1079,9 @@ def print_session_report(report, log_file=None):
 
 
 def main():
-    default_audio = os.path.join(PROJECT_ROOT, "tests", "chime6_data", "audio")
-    default_trans = os.path.join(PROJECT_ROOT, "tests", "chime6_data", "transcriptions")
+    _chime6 = Chime6DatasetManager()
+    default_audio = _chime6.audio_dir
+    default_trans = _chime6.transcriptions_dir
 
     parser = argparse.ArgumentParser(description="CHiME6 Evaluation & Benchmark Script")
     parser.add_argument(

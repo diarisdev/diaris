@@ -22,7 +22,7 @@ dokunmamak. Fallback→Unknown + replay.py'deki sayımdan Unknown/CALIBRATING
 
 import torch
 
-from ..core.ai_worker import AIWorker, SpeakerTracker
+from src.core.ai_worker import AIWorker, SpeakerTracker
 
 
 class EvalSpeakerTracker(SpeakerTracker):

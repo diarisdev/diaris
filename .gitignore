@@ -164,10 +164,8 @@ cython_debug/
 # Yerel AI modelleri
 models/
 
-# Benchmark test data
-tests/libre_speech_data/
-tests/chime6_data/
-tests/ami_data/
+# Benchmark / evaluation datasets (downloaded; large) — now at project root
+/datasets/
 
 # Benchmark output data
 output/
@@ -182,5 +180,3 @@ output/results.csv
 docs/
 
 cuda_compat/
-
-tests/data
