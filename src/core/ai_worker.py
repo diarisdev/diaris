@@ -21,12 +21,8 @@ Warm-up mekanizması:
 
 import logging
 import os
-import tempfile
 import numpy as np
 import torch
-import torchaudio
-import soundfile as sf
-import yaml
 from faster_whisper import WhisperModel
 from pyannote.audio import Pipeline, Model, Inference
 
@@ -35,419 +31,32 @@ from ..config import (
     WHISPER_PATH, DIARIZATION_CONFIG_PATH,
     LOCAL_MODELS_DIR,
     DEFAULT_RATE, DEFAULT_CHANNELS, WHISPER_LANGUAGE,
-    DIARIZATION_EMBEDDING_THRESHOLD, DIARIZATION_WARMUP_MS,
-    CANDIDATE_CONFIRMATIONS_NEEDED, CANDIDATE_TTL, CANDIDATE_SELF_SIMILARITY,
-    MIN_NEW_SPEAKER_DURATION,
+    DIARIZATION_WARMUP_MS,
 )
 from ..audio.utils import calculate_chunk_duration_ms
+from ..audio.preprocessing import (
+    to_mono_float32, resample_to_16k, apply_bandpass_filter,
+    extract_speech_only, load_silero_vad,
+)
+from .diarization_config import prepare_runtime_config, get_short_path
 from .diarization_utils import assign_words_to_speakers
+# SpeakerTracker ayrı modüle taşındı; buradan geri export edilir (eski importlar +
+# EvalSpeakerTracker subclass'ı aynen çalışsın diye).
+from .speaker_tracker import SpeakerTracker
+# Embedding çıkarma + sabitleri ayrı modüle taşındı; geri export edilir.
+from .embedding_extractor import (
+    extract_speaker_embeddings,
+    MIN_SPEECH_DURATION_FOR_EMBEDDING,
+    MIN_AUDIO_RMS_FOR_EMBEDDING,
+    MAX_EMBED_AUDIO_SEC,
+)
 
 logger = logging.getLogger(__name__)
 
-# Minimum embedding requirements
-MIN_SPEECH_DURATION_FOR_EMBEDDING = 1.5  # saniye — embedding için min konuşma süresi
-MIN_AUDIO_RMS_FOR_EMBEDDING = 0.01       # min RMS enerji — sessizliği filtrele
-# Perf: embedding için konuşmacı başına kullanılacak max ses süresi. Daha uzun
-# ses embedding kalitesini kayda değer artırmaz ama Silero VAD'in Python döngüsü
-# ve embedding inference maliyetini (özellikle uzun chunk'larda) şişirir.
-MAX_EMBED_AUDIO_SEC = 6.0
-# (assign_words_to_speakers diarization_utils modülüne taşındı)
-
-
-def load_silero_vad():
-    """Load Silero VAD through one mockable boundary."""
-    model, utils = torch.hub.load("snakers4/silero-vad", "silero_vad", trust_repo=True)
-    return model, utils
-
-
-class SpeakerTracker:
-    """
-    Embedding-based konuşmacı takip sistemi (warm-up destekli).
-    
-    Faz 1 (Warm-up): Kaliteli embedding'ler toplanır, kümelenir.
-    Faz 2 (Aktif):   Yeni embedding'ler baseline'larla karşılaştırılır.
-                      Güncelleme confidence-weighted yapılır.
-
-    Yeni konuşmacı ekleme: Onay tamponu (confirmation buffer) sistemi.
-    - Bilinmeyen bir ses ilk görüldüğünde hemen konuşmacı oluşturulmaz.
-    - Embedding "aday" olarak tamponlanır.
-    - Aynı bilinmeyen ses birden fazla kez tutarlı şekilde görülürse
-      (embedding'ler kendi aralarında benzer) yeni konuşmacı oluşturulur.
-    - Tek seferlik sesler (oyun efektleri, müzik) otomatik filtrelenir.
-    """
-
-    # Aday tamponu sabitleri
-    CANDIDATE_CONFIRMATIONS_NEEDED = CANDIDATE_CONFIRMATIONS_NEEDED   # Yeni konuşmacı için gereken min gözlem
-    CANDIDATE_TTL = CANDIDATE_TTL                                     # Onaylanmayan adaylar kaç chunk sonra silinir
-    CANDIDATE_SELF_SIMILARITY = CANDIDATE_SELF_SIMILARITY             # Aday embedding'lerin kendi aralarındaki min benzerlik
-
-    def __init__(self, threshold=None, warmup_ms=None):
-        self.threshold = threshold if threshold is not None else DIARIZATION_EMBEDDING_THRESHOLD
-        self.warmup_ms = warmup_ms if warmup_ms is not None else DIARIZATION_WARMUP_MS
-
-        # Bilinen konuşmacılar (warm-up sonrası dolu olur)
-        self.known_speakers = {}  # {global_label: embedding_tensor}
-        self._next_id = 0
-
-        # Warm-up state
-        self._warmup_buffer = []  # list of embedding tensors
-        self._warmup_audio_ms = 0  # toplam işlenen ses süresi
-        self._warmup_complete = False
-
-        # Yeni konuşmacı aday tamponu
-        # Her aday: {"embeddings": [tensor, ...], "created_at": int}
-        self._candidates = []
-        self._chunk_counter = 0
-
-    def reset(self):
-        """Tracker durumunu sıfırlayarak yeni bir dosya için hazır hale getirir."""
-        self.known_speakers = {}
-        self._next_id = 0
-        self._warmup_buffer = []
-        self._warmup_audio_ms = 0
-        self._warmup_complete = False
-        self._candidates = []
-        self._chunk_counter = 0
-
-    def _next_label(self):
-        label = f"SPEAKER_{self._next_id:02d}"
-        self._next_id += 1
-        return label
-
-    @property
-    def is_warming_up(self):
-        return not self._warmup_complete
-
-    def add_warmup_embedding(self, embedding, chunk_duration_ms):
-        """
-        Warm-up fazında embedding toplar.
-        Yeterli ses birikince warm-up'ı sonlandırır.
-
-        Returns:
-            bool: True ise warm-up bitti (baseline hazır)
-        """
-        self._warmup_buffer.append(embedding.cpu())
-        self._warmup_audio_ms += chunk_duration_ms
-
-        if self._warmup_audio_ms >= self.warmup_ms:
-            self._finalize_warmup()
-            return True
-        return False
-
-    def _finalize_warmup(self):
-        """
-        İki-aşamalı warm-up clustering:
-        1. Pairwise similarity matrix ile agglomerative clustering
-        2. Küçük kümeleri (< 2 embedding) filtrele (gürültü)
-        """
-        if not self._warmup_buffer:
-            self._warmup_complete = True
-            return
-
-        n = len(self._warmup_buffer)
-        print(f"\n[Warm-up] Clustering {n} embeddings...")
-
-        if n == 1:
-            # Tek embedding varsa direkt konuşmacı oluştur
-            label = self._next_label()
-            self.known_speakers[label] = self._warmup_buffer[0]
-            self._warmup_complete = True
-            self._warmup_buffer = []
-            print(f"[Warm-up Complete] 1 speaker detected: {label}")
-            print(f"   ({self._warmup_audio_ms / 1000:.1f}s audio)\n")
-            return
-
-        # Pairwise similarity matrix
-        emb_stack = torch.stack(self._warmup_buffer)  # (n, dim)
-        sim_matrix = torch.nn.functional.cosine_similarity(
-            emb_stack.unsqueeze(0), emb_stack.unsqueeze(1), dim=2
-        )  # (n, n)
-
-        # Agglomerative clustering — her embedding kendi kümesi olarak başlar
-        cluster_ids = list(range(n))
-        clusters = {i: [i] for i in range(n)}
-
-        # Merge: en yüksek similarity'den başla
-        while True:
-            best_i, best_j, best_sim = -1, -1, -1.0
-
-            active_clusters = list(clusters.keys())
-            for ci_idx in range(len(active_clusters)):
-                for cj_idx in range(ci_idx + 1, len(active_clusters)):
-                    ci = active_clusters[ci_idx]
-                    cj = active_clusters[cj_idx]
-
-                    # Average linkage: kümelerdeki tüm çiftlerin ortalama similarity'si
-                    total_sim = 0.0
-                    count = 0
-                    for mi in clusters[ci]:
-                        for mj in clusters[cj]:
-                            total_sim += sim_matrix[mi, mj].item()
-                            count += 1
-                    avg_sim = total_sim / count if count > 0 else 0.0
-
-                    if avg_sim > best_sim:
-                        best_sim = avg_sim
-                        best_i = ci
-                        best_j = cj
-
-            # Threshold'un altındaysa dur
-            if best_sim < self.threshold or best_i < 0:
-                break
-
-            # Merge clusters
-            clusters[best_i].extend(clusters[best_j])
-            del clusters[best_j]
-
-        # Küçük kümeleri filtrele (gürültü olma ihtimali yüksek)
-        min_cluster_size = 2 if n >= 6 else 1
-        valid_clusters = {k: v for k, v in clusters.items() if len(v) >= min_cluster_size}
-
-        # Eğer filtreleme sonrası hiçbir küme kalmadıysa, en büyük kümeyi al
-        if not valid_clusters:
-            largest = max(clusters.items(), key=lambda x: len(x[1]))
-            valid_clusters = {largest[0]: largest[1]}
-
-        # Her kümeden konuşmacı oluştur
-        for cluster_id, member_indices in valid_clusters.items():
-            member_embs = [self._warmup_buffer[i] for i in member_indices]
-            centroid = torch.stack(member_embs).mean(dim=0)
-            label = self._next_label()
-            self.known_speakers[label] = centroid
-
-        self._warmup_complete = True
-
-        # Filtrelenen embedding sayısı
-        total_used = sum(len(v) for v in valid_clusters.values())
-        filtered_count = n - total_used
-
-        speaker_list = ", ".join(self.known_speakers.keys())
-        print(f"[Warm-up Complete] {len(self.known_speakers)} speaker(s) detected: {speaker_list}")
-        if filtered_count > 0:
-            print(f"   (filtered {filtered_count} noisy embedding(s))")
-        print(f"   ({self._warmup_audio_ms / 1000:.1f}s audio processed)\n")
-
-        self._warmup_buffer = []
-
-    def _find_matching_candidate(self, emb):
-        """
-        Aday tamponunda bu embedding'e benzer bir aday var mı?
-        Varsa adayın index'ini döndürür, yoksa -1.
-        """
-        for idx, cand in enumerate(self._candidates):
-            centroid = torch.stack(cand["embeddings"]).mean(dim=0)
-            score = torch.nn.functional.cosine_similarity(
-                emb.unsqueeze(0), centroid.unsqueeze(0)
-            ).item()
-            if score >= self.CANDIDATE_SELF_SIMILARITY:
-                return idx
-        return -1
-
-    def _try_promote_candidate(self, candidate):
-        """
-        Aday yeterli onay aldıysa ve embedding'ler kendi aralarında
-        tutarlıysa gerçek konuşmacıya yükseltir.
-
-        Returns:
-            str veya None: Yeni konuşmacı etiketi, veya None
-        """
-        if len(candidate["embeddings"]) < self.CANDIDATE_CONFIRMATIONS_NEEDED:
-            return None
-
-        embs = candidate["embeddings"]
-
-        # Kendi aralarında tutarlılık kontrolü
-        if len(embs) >= 2:
-            pair_scores = []
-            for i in range(len(embs)):
-                for j in range(i + 1, len(embs)):
-                    s = torch.nn.functional.cosine_similarity(
-                        embs[i].unsqueeze(0), embs[j].unsqueeze(0)
-                    ).item()
-                    pair_scores.append(s)
-            avg_self_sim = sum(pair_scores) / len(pair_scores)
-            if avg_self_sim < self.CANDIDATE_SELF_SIMILARITY:
-                return None
-
-        # Onaylandı — yeni konuşmacı oluştur
-        centroid = torch.stack(embs).mean(dim=0)
-        norm = torch.norm(centroid)
-        if norm > 0:
-            centroid = centroid / norm
-        new_label = self._next_label()
-        self.known_speakers[new_label] = centroid
-        return new_label
-
-    def _expire_old_candidates(self):
-        """TTL süresi dolan adayları temizler."""
-        self._candidates = [
-            c for c in self._candidates
-            if (self._chunk_counter - c["created_at"]) < self.CANDIDATE_TTL
-        ]
-
-    def _merge_similar_speakers(self, merge_threshold=0.85):
-        """
-        Birbirine çok benzeyen bilinen konuşmacıları birleştirir.
-
-        Warm-up clustering (veya canlı faz) aynı kişiyi yanlışlıkla iki ayrı
-        konuşmacıya bölmüş olabilir; üstelik warm-up'ta belirlenen sayı kalıcı.
-        Bu güvenlik ağı, centroid'leri merge_threshold'u aşan konuşmacıları
-        tek etikete indirir (düşük id'li korunur), böylece şişen sayı zamanla
-        kendiliğinden düzelir.
-
-        Returns:
-            dict: {silinen_etiket: korunan_etiket} — çağıran, mevcut chunk'ın
-                  eşlemesini de bu remap'le güncelleyebilir.
-        """
-        remap = {}
-        labels = sorted(self.known_speakers.keys())  # SPEAKER_00 < SPEAKER_01 ...
-        i = 0
-        while i < len(labels):
-            keep = labels[i]
-            j = i + 1
-            while j < len(labels):
-                drop = labels[j]
-                if keep in self.known_speakers and drop in self.known_speakers:
-                    sim = torch.nn.functional.cosine_similarity(
-                        self.known_speakers[keep].unsqueeze(0),
-                        self.known_speakers[drop].unsqueeze(0),
-                    ).item()
-                    if sim >= merge_threshold:
-                        centroid = (self.known_speakers[keep] + self.known_speakers[drop]) / 2.0
-                        norm = torch.norm(centroid)
-                        if norm > 0:
-                            centroid = centroid / norm
-                        self.known_speakers[keep] = centroid
-                        del self.known_speakers[drop]
-                        remap[drop] = keep
-                        labels.pop(j)
-                        print(f"  [Merge] {drop} → {keep} (sim: {sim:.3f})")
-                        continue
-                j += 1
-            i += 1
-        return remap
-
-    def map_speakers(self, embeddings_dict, quality_dict=None):
-        """
-        Embedding'lere göre konuşmacıları eşler (warm-up sonrası).
-        Confidence-weighted baseline güncelleme yapar.
-        Bilinmeyen sesler için onay tamponu kullanır.
-
-        Args:
-            embeddings_dict: {local_label: embedding_tensor}
-            quality_dict: {local_label: temiz_konuşma_süresi_sn} (opsiyonel).
-                Yalnızca süresi MIN_NEW_SPEAKER_DURATION'ı aşan "güvenilir"
-                embedding'ler yeni konuşmacı (aday) oluşturabilir. Kısa sesler
-                ("evet", "aynen öyle") en yakın mevcut konuşmacıya yapışır,
-                aday tamponuna hiç girmez.
-
-        Returns:
-            dict: {local_label: global_label}
-        """
-        quality_dict = quality_dict or {}
-        self._chunk_counter += 1
-        self._expire_old_candidates()
-        mapping = {}
-
-        for local_label, emb in embeddings_dict.items():
-            emb = emb.cpu()
-            duration = quality_dict.get(local_label, float("inf"))
-            is_reliable = duration >= MIN_NEW_SPEAKER_DURATION
-
-            # Bilinen konuşmacılarla karşılaştır
-            best_match = None
-            best_score = -1.0
-
-            for global_label, known_emb in self.known_speakers.items():
-                score = torch.nn.functional.cosine_similarity(
-                    emb.unsqueeze(0), known_emb.unsqueeze(0)
-                ).item()
-                if score > best_score:
-                    best_score = score
-                    best_match = global_label
-
-            if best_match and best_score >= self.threshold:
-                mapping[local_label] = best_match
-
-                # Centroid drift'i önle: baseline'ı YALNIZCA yüksek güvende
-                # güncelle. Borderline eşleşmeler (0.70-0.85) centroid'i yavaşça
-                # "ortalama bir ses"e kaydırıp baskın konuşmacının herkese
-                # benzemesine yol açıyordu (AMI over-collapse). Artık sadece
-                # >0.85 skorlu, kesin eşleşmeler küçük bir adımla günceller.
-                if best_score > 0.85:
-                    alpha = 0.8  # eski centroid ağırlığı (küçük hareket)
-                    self.known_speakers[best_match] = (
-                        alpha * self.known_speakers[best_match] + (1 - alpha) * emb
-                    )
-                    # Re-normalize baseline to prevent magnitude decay
-                    norm = torch.norm(self.known_speakers[best_match])
-                    if norm > 0:
-                        self.known_speakers[best_match] /= norm
-
-            elif not is_reliable:
-                # Bilinmeyen AMA kısa/güvenilmez ses → yeni konuşmacı YARATMA.
-                # En yakın mevcut konuşmacıya yapıştır (sticky). Bu, kısa
-                # cümlelerin ("evet") yeni konuşmacı doğurmasını engeller.
-                mapping[local_label] = best_match if best_match else "Unknown"
-                if best_match:
-                    print(f"  [Short utterance] sticky → {best_match} "
-                          f"(score: {best_score:.3f}, {duration:.1f}s)")
-
-            else:
-                # Bilinmeyen VE güvenilir (yeterince uzun) ses
-                # — aday tamponuna ekle veya mevcut adayı onayla.
-                # NOT: Eski "belirsizlik bandı" (threshold-0.15 ile threshold arası)
-                # bu sesleri zorla en yakın baskın konuşmacıya atıyordu ve farklı
-                # gerçek konuşmacıları yutuyordu. O dal kaldırıldı; eşik altındaki
-                # güvenilir sesler artık aday tamponundan geçip kendi konuşmacı
-                # etiketini oluşturabilir. Aday kapısı (CONFIRMATIONS=4,
-                # SELF_SIMILARITY=0.78) hayalet konuşmacıları yine de bastırır.
-                cand_idx = self._find_matching_candidate(emb)
-
-                if cand_idx >= 0:
-                    # Mevcut adaya yeni gözlem ekle
-                    self._candidates[cand_idx]["embeddings"].append(emb.clone())
-                    promoted_label = self._try_promote_candidate(self._candidates[cand_idx])
-
-                    if promoted_label:
-                        # Aday onaylandı, gerçek konuşmacı oldu
-                        mapping[local_label] = promoted_label
-                        closest_info = f" (closest: {best_match}, score: {best_score:.3f})" if best_match else ""
-                        confirms = len(self._candidates[cand_idx]["embeddings"])
-                        print(f"  🆕 New speaker: {promoted_label}{closest_info} [confirmed after {confirms} observations]")
-                        self._candidates.pop(cand_idx)
-                    else:
-                        # Henüz yeterli onay yok — en yakın bilinen konuşmacıya ata
-                        mapping[local_label] = best_match if best_match else "Unknown"
-                        confirms = len(self._candidates[cand_idx]["embeddings"])
-                        needed = self.CANDIDATE_CONFIRMATIONS_NEEDED
-                        print(f"  [Candidate] pending ({confirms}/{needed}), mapped to {mapping[local_label]}")
-                else:
-                    # Yeni aday oluştur
-                    self._candidates.append({
-                        "embeddings": [emb.clone()],
-                        "created_at": self._chunk_counter,
-                    })
-                    mapping[local_label] = best_match if best_match else "Unknown"
-                    closest_info = f" (closest: {best_match}, score: {best_score:.3f})" if best_match else ""
-                    print(f"  [Candidate] new candidate registered{closest_info}, mapped to {mapping[local_label]}")
-
-        # Şişen konuşmacı sayısını düzelt: birbirine çok benzeyen bilinenleri
-        # birleştir ve bu chunk'ın eşlemesini de remap'le güncelle.
-        remap = self._merge_similar_speakers()
-        if remap:
-            for local_label, glabel in mapping.items():
-                if glabel in remap:
-                    mapping[local_label] = remap[glabel]
-
-        return mapping
-
-    def map_speakers_fallback(self, local_labels):
-        """Embedding yoksa fallback — her label'a yeni isim atar."""
-        mapping = {}
-        for label in local_labels:
-            mapping[label] = self._next_label()
-        return mapping
+# (assign_words_to_speakers -> diarization_utils; DSP + load_silero_vad ->
+#  ..audio.preprocessing; config plumbing -> diarization_config; SpeakerTracker ->
+#  speaker_tracker; embedding çıkarma -> embedding_extractor. Hepsi buradan geri
+#  export edilir, böylece eski import yolları + subclass'lar aynen çalışır.)
 
 
 class AIWorker:
@@ -469,56 +78,14 @@ class AIWorker:
         self._runtime_config_path = None  # Geçici config dosyası yolu
 
     def _prepare_runtime_config(self, config_path):
-        """
-        Diarization config dosyasını okur, model yollarını runtime'da
-        doğru mutlak yollarla günceller ve ASCII-safe bir temp dizine yazar.
-        Pyannote, config'deki 'segmentation' ve 'embedding' alanlarını
-        Model.from_pretrained() ile yükler. Bu fonksiyon yolları HuggingFace
-        repo ID olarak validate eder — Türkçe karakter (ü) ve boşluk
-        içeren Windows yollarında patlar.
-        Çözüm: Yerel model dizin yollarını Windows kısa yol (8.3) formatına
-        çevirerek config'e yaz.
-        """
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-        models_dir = LOCAL_MODELS_DIR
-        params = config.get("pipeline", {}).get("params", {})
-        # Model yollarını güncelle
-        seg_path = os.path.join(models_dir, "pyannote-segmentation")
-        emb_path = os.path.join(models_dir, "pyannote-embeddings")
-        # Windows kısa yol (8.3) formatına çevir — özel karakterlerden kaçın
-        seg_path = self._get_short_path(seg_path)
-        emb_path = self._get_short_path(emb_path)
-        if os.path.isdir(seg_path):
-            params["segmentation"] = seg_path
-            print(f"   Segmentation model: {seg_path}")
-        if os.path.isdir(emb_path):
-            params["embedding"] = emb_path
-            print(f"   Embedding model: {emb_path}")
-        # Geçici dosyaya yaz (ASCII-safe temp dizini)
-        tmp_file = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yaml", delete=False, encoding="utf-8"
-        )
-        yaml.dump(config, tmp_file, default_flow_style=False, allow_unicode=True)
-        tmp_file.close()
-        self._runtime_config_path = tmp_file.name
-        print(f"   Runtime config: {tmp_file.name}")
-        return tmp_file.name
+        """Diarization config'i runtime'da hazırlar (diarization_config'e delege)."""
+        self._runtime_config_path = prepare_runtime_config(config_path)
+        return self._runtime_config_path
+
     @staticmethod
     def _get_short_path(long_path):
-        """
-        Windows 8.3 kısa yol formatına çevir.
-        Özel karakterler (ü, boşluk vb.) içeren yolları ASCII-safe yapar.
-        """
-        try:
-            import ctypes
-            buf = ctypes.create_unicode_buffer(512)
-            result = ctypes.windll.kernel32.GetShortPathNameW(long_path, buf, 512)
-            if result > 0:
-                return buf.value
-        except Exception:
-            pass
-        return long_path
+        """Windows 8.3 kısa yol (diarization_config'e delege)."""
+        return get_short_path(long_path)
 
     def load_models(self):
         """Modelleri yükler. İlk çağrıda bir kez çalışır."""
@@ -600,196 +167,26 @@ class AIWorker:
             return False
 
     def _to_mono_float32(self, audio_np_int16):
-        """Stereo int16 → mono float32, RMS normalized."""
-        if audio_np_int16.ndim > 1 and audio_np_int16.shape[1] > 1:
-            mono = audio_np_int16[:, 0].astype(np.float32) / 32768.0
-        else:
-            mono = audio_np_int16.flatten().astype(np.float32) / 32768.0
-
-        # RMS normalizasyon (peak yerine — daha kararlı)
-        rms = np.sqrt(np.mean(mono ** 2))
-        if rms > 0.001:
-            target_rms = 0.1
-            mono = mono * (target_rms / rms)
-            # Clipping önle
-            mono = np.clip(mono, -1.0, 1.0)
-        return mono
+        """Stereo int16 → mono float32, RMS normalized (preprocessing'e delege)."""
+        return to_mono_float32(audio_np_int16)
 
     def _resample_for_pyannote(self, mono_float32):
-        """Pyannote'un beklediği 16kHz sample rate'e resample eder."""
-        waveform = torch.from_numpy(mono_float32).unsqueeze(0)
-        if self.rate == 16000:
-            return waveform, 16000
-        resampled = torchaudio.functional.resample(
-            waveform, orig_freq=self.rate, new_freq=16000
-        )
-        return resampled, 16000
+        """16kHz'e resample (preprocessing'e delege)."""
+        return resample_to_16k(mono_float32, self.rate)
 
     def _apply_bandpass_filter(self, waveform_16k):
-        """
-        200-3500 Hz bandpass filter — embedding çıkarmadan önce.
-        İnsan konuşma frekanslarını korur, gürültüyü atar.
-        """
-        try:
-            # Highpass 200 Hz
-            filtered = torchaudio.functional.highpass_biquad(
-                waveform_16k, sample_rate=16000, cutoff_freq=200.0
-            )
-            # Lowpass 3500 Hz
-            filtered = torchaudio.functional.lowpass_biquad(
-                filtered, sample_rate=16000, cutoff_freq=3500.0
-            )
-            return filtered
-        except Exception as exc:
-            logger.debug("Bandpass filter failed, using original waveform: %s", exc)
-            return waveform_16k
+        """200-3500 Hz bandpass (preprocessing'e delege)."""
+        return apply_bandpass_filter(waveform_16k)
 
     def _extract_speech_only(self, waveform_16k_1d):
-        """
-        Silero VAD ile sadece konuşma içeren bölümleri çıkarır.
-        Sessizlik ve arka plan gürültüsünü atar.
-
-        Args:
-            waveform_16k_1d: 1D tensor (samples,) at 16kHz
-
-        Returns:
-            torch.Tensor: sadece konuşma içeren ses (1D), veya orijinal
-        """
-        if self.silero_vad is None:
-            return waveform_16k_1d
-
-        try:
-            # Silero VAD ile speech segmentlerini bul
-            speech_timestamps = []
-            window_size = 512  # 32ms at 16kHz
-            total_samples = waveform_16k_1d.shape[0]
-
-            # Reset VAD state
-            self.silero_vad.reset_states()
-
-            for start in range(0, total_samples - window_size, window_size):
-                chunk = waveform_16k_1d[start:start + window_size]
-                with torch.no_grad():
-                    prob = self.silero_vad(chunk, 16000).item()
-                if prob > 0.5:
-                    speech_timestamps.append((start, start + window_size))
-
-            if not speech_timestamps:
-                return waveform_16k_1d
-
-            # Ardışık segmentleri birleştir
-            merged = [speech_timestamps[0]]
-            for start, end in speech_timestamps[1:]:
-                if start <= merged[-1][1] + window_size:  # gap < 32ms → merge
-                    merged[-1] = (merged[-1][0], end)
-                else:
-                    merged.append((start, end))
-
-            # Konuşma bölümlerini birleştir
-            speech_parts = []
-            for start, end in merged:
-                speech_parts.append(waveform_16k_1d[start:end])
-
-            if speech_parts:
-                return torch.cat(speech_parts)
-            return waveform_16k_1d
-
-        except Exception as exc:
-            logger.debug("Speech-only extraction failed, using original waveform: %s", exc)
-            return waveform_16k_1d
+        """Silero VAD ile speech-only (preprocessing'e delege)."""
+        return extract_speech_only(waveform_16k_1d, self.silero_vad)
 
     def _extract_speaker_embeddings(self, waveform_16k, turns):
-        """
-        Her konuşmacı için ses bölümlerini ayırıp embedding çıkarır.
-        
-        İyileştirmeler:
-        - Min süre kontrolü (< 1.5s konuşma → atla)
-        - Min enerji kontrolü (sessizlik → atla)
-        - Bandpass filter (200-3500 Hz)
-        - Speech-only extraction (Silero VAD)
-
-        Returns:
-            tuple: (embeddings_dict, quality_dict)
-                embeddings_dict: {local_speaker_label: embedding_tensor}
-                quality_dict:    {local_speaker_label: temiz_konuşma_süresi_sn}
-        """
-        if self.embedding_model is None:
-            return {}, {}
-
-        embeddings_dict = {}
-        quality_dict = {}
-        unique_speakers = set(t["speaker"] for t in turns)
-
-        for spk in unique_speakers:
-            spk_turns = [t for t in turns if t["speaker"] == spk]
-            spk_audio_parts = []
-
-            for t in spk_turns:
-                start_sample = int(t["start"] * 16000)
-                end_sample = min(int(t["end"] * 16000), waveform_16k.shape[1])
-                if start_sample < end_sample:
-                    spk_audio_parts.append(waveform_16k[0, start_sample:end_sample])
-
-            if not spk_audio_parts:
-                continue
-
-            spk_audio_raw = torch.cat(spk_audio_parts)
-
-            # --- Kalite kontrolleri ---
-            # 1. Min süre kontrolü
-            duration_sec = spk_audio_raw.shape[0] / 16000
-            if duration_sec < MIN_SPEECH_DURATION_FOR_EMBEDDING:
-                continue
-
-            # 2. Min enerji kontrolü
-            rms_energy = torch.sqrt(torch.mean(spk_audio_raw ** 2)).item()
-            if rms_energy < MIN_AUDIO_RMS_FOR_EMBEDDING:
-                continue
-
-            # Perf cap: pahalı adımlardan (Silero VAD döngüsü + embedding) önce
-            # konuşmacı başına sesi MAX_EMBED_AUDIO_SEC ile sınırla.
-            max_samples = int(MAX_EMBED_AUDIO_SEC * 16000)
-            if spk_audio_raw.shape[0] > max_samples:
-                spk_audio_raw = spk_audio_raw[:max_samples]
-
-            # 3. Speech-only extraction (sessizliği temizle)
-            spk_audio_clean = self._extract_speech_only(spk_audio_raw)
-
-            # Temizlenmiş ses hâlâ yeterli mi?
-            if spk_audio_clean.shape[0] < int(MIN_SPEECH_DURATION_FOR_EMBEDDING * 16000):
-                continue
-
-            clean_duration_sec = spk_audio_clean.shape[0] / 16000
-
-            # 4. Bandpass filter (konuşma frekansları)
-            spk_waveform = self._apply_bandpass_filter(spk_audio_clean.unsqueeze(0))
-
-            try:
-                emb_output = self.embedding_model({
-                    "waveform": spk_waveform,
-                    "sample_rate": 16000,
-                })
-                if isinstance(emb_output, np.ndarray):
-                    emb_tensor = torch.from_numpy(emb_output).float()
-                elif isinstance(emb_output, torch.Tensor):
-                    emb_tensor = emb_output.float()
-                else:
-                    emb_tensor = torch.tensor(emb_output).float()
-
-                emb_tensor = emb_tensor.squeeze().cpu()
-                
-                # 5. L2 Normalization (Prevents scale issues in clustering/similarity)
-                emb_norm = torch.norm(emb_tensor)
-                if emb_norm > 0:
-                    emb_tensor = emb_tensor / emb_norm
-
-                embeddings_dict[spk] = emb_tensor
-                quality_dict[spk] = clean_duration_sec
-
-            except Exception as e:
-                print(f"  [Embedding] {spk}: {e}")
-
-        return embeddings_dict, quality_dict
+        """Konuşmacı embedding çıkarma (embedding_extractor'a delege)."""
+        return extract_speaker_embeddings(
+            self.embedding_model, self.silero_vad, waveform_16k, turns
+        )
 
     def _get_chunk_duration_ms(self, chunk_bytes):
         """Chunk süresini ms cinsinden hesaplar."""
