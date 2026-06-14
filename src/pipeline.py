@@ -352,13 +352,20 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
         # Always initialize translation engine for dynamic switching capability
         deepl_key = os.getenv("DEEPL_API_KEY")
         nllb_path = os.path.join(LOCAL_MODELS_DIR, "ctranslate2-nllb-200-distilled-600M")
+        # TRANSLATION_ENGINE açıkça verildiyse otomatik zinciri ATLA ve o motoru
+        # zorla (örn. "google"). Boş bırakılırsa eski otomatik öncelik korunur:
+        # DeepL anahtarı > yerel NLLB > Google (yedek).
+        forced_engine = os.getenv("TRANSLATION_ENGINE", "").strip().lower()
         translation_engine = None
         engine_name = "Çeviri Devre Dışı"
 
-        if deepl_key:
+        if forced_engine == "google":
+            translation_engine = get_translation_engine("google")
+            engine_name = "Google Translate (Online - forced)"
+        elif forced_engine == "deepl" or (not forced_engine and deepl_key):
             translation_engine = get_translation_engine("deepl", api_key=deepl_key)
             engine_name = "DeepL API (Online)"
-        elif os.path.exists(nllb_path):
+        elif forced_engine == "ctranslate2" or (not forced_engine and os.path.exists(nllb_path)):
             translation_engine = get_translation_engine("ctranslate2", model_path=nllb_path)
             if hasattr(translation_engine, 'translator') and translation_engine.translator is not None:
                 engine_name = "CTranslate2 (NLLB-200 Local)"
