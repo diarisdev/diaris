@@ -204,12 +204,18 @@ class SubtitleOverlay(QtWidgets.QWidget):
                     speaker_tag = spk
                 parsed_lines.append((speaker_tag, content))
 
-        # Yalnızca en son N konuşmacı satırını göster
+        # Yalnızca en son N konuşmacı satırını göster. Ardışık satır aynı
+        # konuşmacıya aitse etiketi (örn. "Konuşmacı 1") tekrarlamayız; satır
+        # konuşmacı sütunu kadar girintilenir, böylece metin hizalı kalır.
+        prev_tag = None
         for speaker_tag, content in parsed_lines[-self.MAX_VISIBLE_LINES:]:
+            is_continuation = bool(speaker_tag) and speaker_tag == prev_tag
+            prev_tag = speaker_tag
             self.segments.append({
-                "speaker": display_name(speaker_tag) if speaker_tag else "",
+                "speaker": "" if is_continuation else (display_name(speaker_tag) if speaker_tag else ""),
                 "text": content,
                 "color": color_for_speaker(speaker_tag),
+                "continuation": is_continuation,
             })
 
         self.partial_text = partial_text
@@ -238,7 +244,14 @@ class SubtitleOverlay(QtWidgets.QWidget):
                 spk_label.setMinimumWidth(92)
                 spk_label.setMaximumWidth(132)
                 row_layout.addWidget(spk_label, 0, QtCore.Qt.AlignmentFlag.AlignTop)
-            
+            elif seg.get('continuation'):
+                # Aynı konuşmacının devam satırı: etiket tekrarlanmaz ama metin
+                # üstteki satırla hizalı kalsın diye konuşmacı sütunu kadar boşluk.
+                spacer = QtWidgets.QLabel("", row)
+                spacer.setMinimumWidth(92)
+                spacer.setMaximumWidth(132)
+                row_layout.addWidget(spacer, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+
             # Metin
             text_color = seg['color'] if self.speaker_coloring else "#ffffff"
             text_label = QtWidgets.QLabel(seg['text'], row)
