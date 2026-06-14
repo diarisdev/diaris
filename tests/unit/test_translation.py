@@ -1,4 +1,5 @@
 import os
+import pytest
 from src.translation.engine import (
     get_translation_engine,
     GoogleTranslationEngine,
@@ -31,6 +32,7 @@ def test_ctranslate2_translation_engine_fallback():
     assert len(result) > 0
 
 def test_local_nllb_translation_engine():
+    pytest.importorskip("ctranslate2")
     model_path = os.path.join("models", "ctranslate2-nllb-200-distilled-600M")
     if os.path.exists(model_path):
         engine = get_translation_engine("ctranslate2", model_path=model_path)

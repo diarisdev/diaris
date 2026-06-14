@@ -73,6 +73,7 @@ class AIWorker:
         self.transcriber = None
         self.embedding_model = None
         self.silero_vad = None  # Speech-only embedding için
+        self.vad_utils = None
         self._loaded = False
         self.speaker_tracker = SpeakerTracker()
         self._runtime_config_path = None  # Geçici config dosyası yolu
@@ -147,11 +148,12 @@ class AIWorker:
 
             # Silero VAD: Speech-only embedding extraction için
             try:
-                self.silero_vad, _ = load_silero_vad()
+                self.silero_vad, self.vad_utils = load_silero_vad()
                 print("[AI Worker] Silero VAD loaded (speech-only embedding enabled)")
             except Exception as vad_err:
                 logger.warning("Silero VAD could not be loaded: %s", vad_err)
                 self.silero_vad = None
+                self.vad_utils = None
 
             self.transcriber = WhisperModel(
                 WHISPER_PATH, device=DEVICE, compute_type=COMPUTE_TYPE
@@ -180,12 +182,14 @@ class AIWorker:
 
     def _extract_speech_only(self, waveform_16k_1d):
         """Silero VAD ile speech-only (preprocessing'e delege)."""
-        return extract_speech_only(waveform_16k_1d, self.silero_vad)
+        get_speech_timestamps = self.vad_utils[0] if (self.vad_utils and len(self.vad_utils) > 0) else None
+        return extract_speech_only(waveform_16k_1d, self.silero_vad, get_speech_timestamps)
 
     def _extract_speaker_embeddings(self, waveform_16k, turns):
         """Konuşmacı embedding çıkarma (embedding_extractor'a delege)."""
+        get_speech_timestamps = self.vad_utils[0] if (self.vad_utils and len(self.vad_utils) > 0) else None
         return extract_speaker_embeddings(
-            self.embedding_model, self.silero_vad, waveform_16k, turns
+            self.embedding_model, self.silero_vad, get_speech_timestamps, waveform_16k, turns
         )
 
     def _get_chunk_duration_ms(self, chunk_bytes):

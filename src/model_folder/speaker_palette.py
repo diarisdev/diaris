@@ -66,8 +66,8 @@ def color_for_speaker(label: str) -> str:
 
 
 def display_name(label: str) -> str:
-    """SPEAKER_00 → 'Konuşmacı 1' gibi kullanıcı dostu ad; diğerleri olduğu gibi."""
+    """SPEAKER_00 -> 'SPEAKER_00' format for English UI; others as-is."""
     idx = speaker_index(label)
     if idx is not None:
-        return f"Konuşmacı {idx + 1}"
+        return f"SPEAKER_{idx:02d}"
     return label

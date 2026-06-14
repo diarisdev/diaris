@@ -68,7 +68,7 @@ def apply_bandpass_filter(waveform_16k):
         return waveform_16k
 
 
-def extract_speech_only(waveform_16k_1d, silero_vad):
+def extract_speech_only(waveform_16k_1d, silero_vad, get_speech_timestamps=None):
     """
     Silero VAD ile sadece konuşma içeren bölümleri çıkarır.
     Sessizlik ve arka plan gürültüsünü atar.
@@ -76,6 +76,8 @@ def extract_speech_only(waveform_16k_1d, silero_vad):
     Args:
         waveform_16k_1d: 1D tensor (samples,) at 16kHz
         silero_vad: yüklü Silero VAD modeli (None ise ses olduğu gibi döner)
+        get_speech_timestamps: Silero VAD'ın kendi get_speech_timestamps utility fonksiyonu.
+                               Sağlanırsa hızlı ve optimize vectorized path kullanılır.
 
     Returns:
         torch.Tensor: sadece konuşma içeren ses (1D), veya orijinal
@@ -84,7 +86,15 @@ def extract_speech_only(waveform_16k_1d, silero_vad):
         return waveform_16k_1d
 
     try:
-        # Silero VAD ile speech segmentlerini bul
+        if get_speech_timestamps is not None:
+            # Hızlı, vectorized ve optimize Silero VAD path'i
+            speech_dicts = get_speech_timestamps(waveform_16k_1d, silero_vad, threshold=0.5, sampling_rate=16000)
+            speech_parts = [waveform_16k_1d[ts["start"]:ts["end"]] for ts in speech_dicts]
+            if speech_parts:
+                return torch.cat(speech_parts)
+            return torch.tensor([], dtype=waveform_16k_1d.dtype, device=waveform_16k_1d.device)
+
+        # Fallback: Yavaş ama güvenli manuel döngü (get_speech_timestamps yoksa)
         speech_timestamps = []
         window_size = 512  # 32ms at 16kHz
         total_samples = waveform_16k_1d.shape[0]
