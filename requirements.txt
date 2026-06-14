@@ -1,4 +1,3 @@
-customtkinter
 faster-whisper
 huggingface_hub
 keyboard

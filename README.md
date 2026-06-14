@@ -9,7 +9,7 @@ Windows üzerinde sistem sesini (WASAPI Loopback) yakalayıp Whisper ile transkr
 src/
 ├── config.py               # Tüm ayarlar (.env'den yüklenir)
 ├── pipeline.py             # Canlı kayıt döngüsü, chunk yönetimi, AI thread
-├── gui.py                  # CustomTkinter arayüzü
+├── ui/                     # PySide6 arayüzü (ana pencere, overlay, tray)
 ├── audio/
 │   ├── device.py           # WASAPI loopback cihaz algılama
 │   ├── vad.py              # İkili VAD: WebRTC (ön filtre) + Silero (doğrulama)
@@ -60,7 +60,7 @@ Bu komut `models/` altına şunları indirir:
 ## Çalıştırma
 
 ```bash
-python main.py          # GUI (CustomTkinter)
+python main.py          # GUI (PySide6)
 python main.py --cli    # Terminal modu (Ctrl+Q ile durdur)
 ```
 
