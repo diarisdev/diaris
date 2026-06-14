@@ -46,12 +46,23 @@ def _demo_chime6():
     print("📊", m.get_summary())
 
 
+def _demo_ami_refs():
+    m = get_dataset("ami_refs")
+    m.download()  # lhotse ile ~birkaç GB indirir
+    print("📊", m.get_summary())
+
+
 _DEMOS = {
     "flores200": _demo_flores200,
     "librispeech": _demo_librispeech,
     "ami": _demo_ami,
+    "ami_refs": _demo_ami_refs,
     "chime6": _demo_chime6,
 }
+
+# 'all' ile otomatik inecekler — ami_refs (birkaç GB + lhotse) bilerek HARİÇ;
+# açıkça istenince iner: python -m tests.dataset_managers ami_refs
+_ALL = ["flores200", "librispeech", "ami", "chime6"]
 
 
 def main():
@@ -65,7 +76,7 @@ def main():
                         choices=["all"] + available_datasets())
     args = parser.parse_args()
 
-    selected = available_datasets() if args.dataset == "all" else [args.dataset]
+    selected = _ALL if args.dataset == "all" else [args.dataset]
     failures = []
     for name in selected:
         print("\n" + "=" * 60)

@@ -45,6 +45,9 @@ python -m tests.benchmarks.librispeech_asr --limit 20
 # AMI diarization (DER)
 python -m tests.benchmarks.ami_diarization --mode raw
 
+# AMI referanslarını hazırla (replay/score için gerekli; lhotse + ~birkaç GB indirir)
+python -m tests.dataset_managers ami_refs
+
 # AMI offline replay -> hipotez üret, sonra skorla
 python -m tests.benchmarks.ami_replay --only IS1009a
 python -m tests.benchmarks.ami_score

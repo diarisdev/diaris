@@ -12,13 +12,14 @@ Veri kökü: <proje kökü>/datasets/ (gitignore'lı). Hepsini indirmek için:
 from .base import DATASETS_ROOT, _download_with_progress, download_targz
 from .librispeech import DatasetManager, _parse_transcription_file
 from .flores200 import FloresDatasetManager, FLORES_LANG_MAP
-from .ami import AmiDiarizationManager
+from .ami import AmiDiarizationManager, AmiReferenceManager
 from .chime6 import Chime6DatasetManager, parse_time_to_seconds, clean_chime6_text
 
 _REGISTRY = {
     "librispeech": DatasetManager,
     "flores200": FloresDatasetManager,
-    "ami": AmiDiarizationManager,
+    "ami": AmiDiarizationManager,          # küçük DER alt kümesi (2 toplantı)
+    "ami_refs": AmiReferenceManager,       # replay/score için 16-toplantı test referansları (lhotse)
     "chime6": Chime6DatasetManager,
 }
 
@@ -39,7 +40,7 @@ __all__ = [
     "DATASETS_ROOT", "_download_with_progress", "download_targz",
     "DatasetManager", "_parse_transcription_file",
     "FloresDatasetManager", "FLORES_LANG_MAP",
-    "AmiDiarizationManager", "Chime6DatasetManager",
+    "AmiDiarizationManager", "AmiReferenceManager", "Chime6DatasetManager",
     "parse_time_to_seconds", "clean_chime6_text",
     "get_dataset", "available_datasets",
 ]
