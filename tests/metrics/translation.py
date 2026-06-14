@@ -42,14 +42,15 @@ def compute_chrf(hypotheses, references, word_order: int = 2) -> float:
 
 def compute_comet(sources, hypotheses, references,
                   model_name: str = "Unbabel/wmt22-comet-da",
-                  gpus: int = 0, batch_size: int = 8) -> float:
+                  gpus: int = 0, batch_size: int = 8, model_dir=None) -> float:
     """Referans tabanlı COMET (sistem-seviyesi skor).
 
-    İlk çağrıda modeli indirir (~2GB). CPU'da yavaştır ama offline raporlama
-    için uygundur (gpus=0).
+    İlk çağrıda modeli indirir (~2GB). model_dir verilirse global HF cache yerine
+    o dizine indirir (proje-yerel). CPU'da yavaştır ama offline raporlama için uygun.
     """
     from comet import download_model, load_from_checkpoint
-    ckpt = download_model(model_name)
+    # saving_directory: modeli global ~/.cache yerine proje-yerel dizine indir
+    ckpt = download_model(model_name, saving_directory=model_dir)
     model = load_from_checkpoint(ckpt)
     data = [
         {"src": s, "mt": h, "ref": r}
@@ -62,11 +63,12 @@ def compute_comet(sources, hypotheses, references,
 
 def evaluate_translation(sources, hypotheses, references, with_comet: bool = True,
                          comet_model: str = "Unbabel/wmt22-comet-da",
-                         gpus: int = 0) -> TranslationResult:
+                         gpus: int = 0, comet_dir=None) -> TranslationResult:
     """sacreBLEU + chrF++ (+ opsiyonel COMET) hepsini tek çağrıda hesaplar.
 
     Eksik kütüphaneler sessizce atlanır (ilgili alan None kalır) ki kısmi
-    sonuç yine de raporlanabilsin.
+    sonuç yine de raporlanabilsin. comet_dir: COMET modelinin indirileceği
+    proje-yerel dizin (None ise global HF cache).
     """
     hyps = list(hypotheses)
     refs = list(references)
@@ -82,7 +84,8 @@ def evaluate_translation(sources, hypotheses, references, with_comet: bool = Tru
 
     if with_comet:
         try:
-            res.comet = compute_comet(srcs, hyps, refs, model_name=comet_model, gpus=gpus)
+            res.comet = compute_comet(srcs, hyps, refs, model_name=comet_model,
+                                      gpus=gpus, model_dir=comet_dir)
         except ImportError:
             print("WARNING: `unbabel-comet` kurulu değil (pip install unbabel-comet); "
                   "COMET atlandı.")

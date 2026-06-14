@@ -76,7 +76,10 @@ def _make_engine(name, model_path=None, api_key=None):
 
 
 def run(pairs, engines, split="devtest", limit=None, model_path=None,
-        api_key=None, with_comet=True, batch_size=8):
+        api_key=None, with_comet=True, batch_size=8, comet_dir=None, comet_gpus=0):
+    # COMET modelini global cache yerine proje-yerel dizine indir (varsayılan models/comet)
+    if comet_dir is None:
+        comet_dir = os.path.join(PROJECT_ROOT, "models", "comet")
     fm = FloresDatasetManager()
     if not fm.is_downloaded():
         print("📥 FLORES-200 bulunamadı, indiriliyor...")
@@ -108,7 +111,8 @@ def run(pairs, engines, split="devtest", limit=None, model_path=None,
             except Exception as e:
                 print(f"    ❌ {eng_name} çeviri hatası: {e}")
                 continue
-            res = evaluate_translation(sources, hyps, references, with_comet=with_comet)
+            res = evaluate_translation(sources, hyps, references, with_comet=with_comet,
+                                       comet_dir=comet_dir, gpus=comet_gpus)
             rows.append((eng_name, direction, res.n_segments, res.bleu, res.chrf, res.comet))
             print(f"    BLEU={_fmt(res.bleu)}  chrF++={_fmt(res.chrf)}  COMET={_fmt(res.comet, 4)}")
 
@@ -147,6 +151,10 @@ def main():
     ap.add_argument("--model-path", default=None, help="Yerel NLLB CTranslate2 model yolu.")
     ap.add_argument("--api-key", default=None, help="DeepL API anahtarı (yoksa Google'a düşer).")
     ap.add_argument("--no-comet", action="store_true", help="COMET'i atla (hızlı).")
+    ap.add_argument("--comet-dir", default=None,
+                    help="COMET modelinin indirileceği proje-yerel dizin (varsayılan: models/comet).")
+    ap.add_argument("--comet-gpus", type=int, default=0,
+                    help="COMET için GPU sayısı (varsayılan 0=CPU; CUDA varsa 1 çok daha hızlı).")
     ap.add_argument("--batch-size", type=int, default=8,
                     help="Çeviri parti boyutu (online motorlar için küçük tut; varsayılan: 8).")
     args = ap.parse_args()
@@ -155,7 +163,8 @@ def main():
     engines = [e.strip() for e in args.engines.split(",") if e.strip()]
     run(pairs, engines, split=args.split, limit=args.limit,
         model_path=args.model_path, api_key=args.api_key,
-        with_comet=not args.no_comet, batch_size=args.batch_size)
+        with_comet=not args.no_comet, batch_size=args.batch_size,
+        comet_dir=args.comet_dir, comet_gpus=args.comet_gpus)
 
 
 if __name__ == "__main__":
