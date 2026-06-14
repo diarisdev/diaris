@@ -167,8 +167,9 @@ class SubtitleOverlay(QtWidgets.QWidget):
                 self.resize_grip.setToolTip(self.TRANSLATIONS[lang]["resize_tooltip"])
             self.render_subtitles()
 
-    # Overlay'de aynı anda gösterilecek en fazla konuşmacı satırı sayısı
-    MAX_VISIBLE_LINES = 3
+    # Overlay'de aynı anda gösterilecek en fazla kesinleşmiş konuşmacı satırı.
+    # 2 eski cümle + 1 canlı (partial) cümle = ekranda toplam 3 satır.
+    MAX_VISIBLE_LINES = 2
 
     def update_subtitles(self, finalized_segments, partial_text):
         """Yeni altyazıları kabul eder ve arayüzde gösterir.
