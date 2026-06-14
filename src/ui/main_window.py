@@ -142,6 +142,8 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # Alt bileşenler
         self.overlay = SubtitleOverlay()
+        # Overlay'e çift tıklanınca ana paneli aç/gizle (toggle)
+        self.overlay.restore_requested.connect(self.toggle_main_window)
         if self.overlay_visible:
             self.overlay.show()
             
@@ -1094,6 +1096,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
+
+    def toggle_main_window(self):
+        # Overlay'e çift tıklandığında: panel görünüyorsa tepsiye gizle,
+        # gizliyse (veya simge durumundaysa) öne getir.
+        # Not: aktif pencere kontrolü yapılamaz çünkü çift tıklamadan sonra
+        # aktif pencere overlay'in kendisidir.
+        if self.isVisible() and not self.isMinimized():
+            self.hide()
+        else:
+            self.show_and_raise()
 
     def close_app(self):
         # UI öğelerini devre dışı bırak

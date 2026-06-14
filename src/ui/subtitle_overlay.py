@@ -27,9 +27,12 @@ class ResizeGrip(QtWidgets.QSizeGrip):
 
 
 class SubtitleOverlay(QtWidgets.QWidget):
+    # Overlay'e çift tıklandığında ana kontrol panelini geri getirmek için yayınlanır
+    restore_requested = QtCore.Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        
+
         # Sürükleme (Drag) koordinatları
         self.drag_position = QtCore.QPoint()
         
@@ -351,6 +354,12 @@ class SubtitleOverlay(QtWidgets.QWidget):
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent):
         if not self.click_through:
             self.handle_release()
+            event.accept()
+
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent):
+        # Çift tıklama: ikon haline küçülmüş ana kontrol panelini geri getir
+        if not self.click_through and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.restore_requested.emit()
             event.accept()
 
     def resizeEvent(self, event):
