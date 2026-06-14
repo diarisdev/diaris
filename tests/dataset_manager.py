@@ -17,13 +17,45 @@ import os
 import tarfile
 import urllib.request
 import shutil
-import soundfile as sf
 from pathlib import Path
+
+# soundfile yalnızca SES veri setleri (LibriSpeech/AMI) için gerekir. FLORES-200
+# (metin çeviri) yöneticisi ses kütüphanesi gerektirmesin diye import tembel
+# yapılır; ses süresi okuyan fonksiyonlar çağrılınca yüklenir.
+try:
+    import soundfile as sf
+except ImportError:
+    sf = None
 
 
 # --- Veri Seti Sabitleri ---
 LIBRISPEECH_URL = "https://www.openslr.org/resources/12/test-clean.tar.gz"
 LIBRISPEECH_DIR_NAME = "LibriSpeech/test-clean"
+
+# FLORES-200: Meta'nın NLLB-200 makalesinde kullanılan, 200 dili kapsayan
+# insan-çevirili paralel çeviri benchmark'ı. Çeviri motorlarımızın (Google,
+# DeepL, yerel NLLB) kalitesini akademik makalelerle KARŞILAŞTIRILABİLİR
+# biçimde ölçmek için kullanılır.
+FLORES_URL = "https://dl.fbaipublicfiles.com/nllb/flores200_dataset.tar.gz"
+FLORES_DIR_NAME = "flores200_dataset"
+
+# Projedeki kısa dil kodları -> FLORES-200 kodları.
+# src/translation/engine.py içindeki CTranslate2 lang_map ile aynı diller.
+FLORES_LANG_MAP = {
+    "en": "eng_Latn",
+    "tr": "tur_Latn",
+    "de": "deu_Latn",
+    "fr": "fra_Latn",
+    "es": "spa_Latn",
+    "it": "ita_Latn",
+    "pt": "por_Latn",
+    "ru": "rus_Cyrl",
+    "zh": "zho_Hans",
+    "ar": "arb_Arab",
+    "ja": "jpn_Jpan",
+    "ko": "kor_Hang",
+    "nl": "nld_Latn",
+}
 
 # Varsayılan veri seti kök dizini (proje kökü/tests/data)
 DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -120,6 +152,11 @@ class DatasetManager:
         if not self.is_downloaded():
             print("⚠️  Veri seti bulunamadı. Önce download() çağırın.")
             return []
+
+        if sf is None:
+            raise ImportError(
+                "LibriSpeech örnekleri için 'soundfile' gerekli: pip install soundfile"
+            )
 
         samples = []
 
@@ -247,6 +284,180 @@ def _parse_transcription_file(trans_path):
 
 
 
+class FloresDatasetManager:
+    """
+    FLORES-200 çeviri benchmark veri setini indiren, açan ve
+    paralel (kaynak metin, referans çeviri) çiftlerini yöneten sınıf.
+
+    FLORES-200 tamamen PARALEL'dir: her split'te aynı satır numarası, tüm
+    dillerde aynı cümleye karşılık gelir. Böylece Google/DeepL/NLLB motorları
+    AYNI cümle kümesi üzerinde adil biçimde karşılaştırılabilir.
+
+    Split'ler:
+      - dev      (997 cümle)   -> ayar/geliştirme için
+      - devtest  (1012 cümle)  -> RAPORLAMA için (makalelerde bu kullanılır)
+
+    Kullanım:
+        manager = FloresDatasetManager()
+        manager.download()
+        pairs = manager.get_pairs("en", "tr", split="devtest", limit=100)
+        # -> [{"source": "...", "reference": "...",
+        #      "source_lang": "en", "target_lang": "tr", "index": 0}, ...]
+    """
+
+    def __init__(self, data_dir=None):
+        """
+        Args:
+            data_dir: Veri setinin indirileceği dizin.
+                      None ise tests/data/ kullanılır.
+        """
+        self.data_dir = data_dir or DEFAULT_DATA_DIR
+        self.archive_path = os.path.join(self.data_dir, "flores200_dataset.tar.gz")
+        self.dataset_root = os.path.join(self.data_dir, FLORES_DIR_NAME)
+
+    def is_downloaded(self):
+        """Veri seti indirilmiş ve açılmış mı kontrol eder (devtest dizinine bakar)."""
+        return os.path.isdir(os.path.join(self.dataset_root, "devtest"))
+
+    def download(self, force=False):
+        """
+        FLORES-200 veri setini indirir ve açar.
+
+        Args:
+            force: True ise mevcut veriyi silip yeniden indirir.
+
+        Returns:
+            bool: İşlem başarılı ise True.
+        """
+        if self.is_downloaded() and not force:
+            print("✅ FLORES-200 zaten mevcut, indirme atlanıyor.")
+            return True
+
+        os.makedirs(self.data_dir, exist_ok=True)
+
+        # İndirme
+        if not os.path.exists(self.archive_path) or force:
+            print(f"📥 FLORES-200 indiriliyor...")
+            print(f"   Kaynak: {FLORES_URL}")
+            print(f"   Hedef:  {self.archive_path}")
+            print(f"   ⚠️  Boyut ~25 MB.\n")
+
+            try:
+                _download_with_progress(FLORES_URL, self.archive_path)
+            except Exception as e:
+                print(f"❌ İndirme başarısız: {e}")
+                return False
+        else:
+            print("📦 Arşiv zaten indirilmiş, açılıyor...")
+
+        # Arşivi aç
+        print("📂 Arşiv açılıyor...")
+        try:
+            with tarfile.open(self.archive_path, "r:gz") as tar:
+                tar.extractall(path=self.data_dir)
+            print("✅ FLORES-200 başarıyla hazırlandı.")
+        except Exception as e:
+            print(f"❌ Arşiv açma başarısız: {e}")
+            return False
+
+        # Arşiv dosyasını sil (disk alanı tasarrufu)
+        try:
+            os.remove(self.archive_path)
+            print("🗑️  Arşiv dosyası silindi (disk tasarrufu).")
+        except Exception:
+            pass
+
+        return True
+
+    def _read_split_file(self, lang_code, split):
+        """Tek bir dilin split dosyasını satır listesi olarak okur."""
+        path = os.path.join(self.dataset_root, split, f"{lang_code}.{split}")
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"FLORES dosyası bulunamadı: {path}. "
+                f"Dil kodu '{lang_code}' veya split '{split}' yanlış olabilir."
+            )
+        with open(path, "r", encoding="utf-8") as f:
+            return [line.rstrip("\n") for line in f]
+
+    def get_pairs(self, source_lang, target_lang, split="devtest", limit=None):
+        """
+        İki dil arasındaki paralel (kaynak, referans) çiftlerini döndürür.
+
+        Args:
+            source_lang: Kaynak dil — kısa kod ("en") veya FLORES kodu ("eng_Latn").
+            target_lang: Hedef dil — kısa kod ("tr") veya FLORES kodu ("tur_Latn").
+            split: "devtest" (raporlama) veya "dev" (ayar).
+            limit: Döndürülecek maksimum çift sayısı. None ise tümü.
+
+        Returns:
+            list[dict]: Her öğe şu anahtarları içerir:
+                - source (str): Kaynak dildeki cümle
+                - reference (str): Hedef dildeki insan-çevirili referans
+                - source_lang (str): İstenen kaynak dil kodu
+                - target_lang (str): İstenen hedef dil kodu
+                - index (int): Cümlenin split içindeki satır numarası
+        """
+        if not self.is_downloaded():
+            print("⚠️  FLORES-200 bulunamadı. Önce download() çağırın.")
+            return []
+
+        src_code = FLORES_LANG_MAP.get(source_lang.split("-")[0].lower(), source_lang)
+        tgt_code = FLORES_LANG_MAP.get(target_lang.split("-")[0].lower(), target_lang)
+
+        src_lines = self._read_split_file(src_code, split)
+        tgt_lines = self._read_split_file(tgt_code, split)
+
+        if len(src_lines) != len(tgt_lines):
+            print(
+                f"⚠️  Satır sayıları uyuşmuyor ({src_code}: {len(src_lines)}, "
+                f"{tgt_code}: {len(tgt_lines)}). Kısa olana göre kesiliyor."
+            )
+
+        count = min(len(src_lines), len(tgt_lines))
+        if limit:
+            count = min(count, limit)
+
+        return [
+            {
+                "source": src_lines[i],
+                "reference": tgt_lines[i],
+                "source_lang": source_lang,
+                "target_lang": target_lang,
+                "index": i,
+            }
+            for i in range(count)
+        ]
+
+    def available_languages(self):
+        """Bu yöneticinin desteklediği kısa dil kodlarını döndürür."""
+        return sorted(FLORES_LANG_MAP.keys())
+
+    def get_summary(self, split="devtest"):
+        """Veri seti hakkında özet istatistikler döndürür."""
+        if not self.is_downloaded():
+            return {"status": "not_ready", "count": 0}
+
+        try:
+            eng_lines = self._read_split_file("eng_Latn", split)
+        except FileNotFoundError:
+            return {"status": "not_ready", "count": 0}
+
+        return {
+            "status": "ready",
+            "split": split,
+            "sentence_count": len(eng_lines),
+            "supported_languages": len(FLORES_LANG_MAP),
+            "language_codes": ", ".join(sorted(FLORES_LANG_MAP.keys())),
+        }
+
+    def cleanup(self):
+        """FLORES veri setini siler (diğer test verilerine dokunmaz)."""
+        if os.path.isdir(self.dataset_root):
+            shutil.rmtree(self.dataset_root)
+            print("🗑️  FLORES-200 silindi.")
+
+
 class AmiDiarizationManager:
     """
     AMI Meeting Corpus'un küçük bir alt kümesini indirir ve
@@ -368,9 +579,12 @@ class AmiDiarizationManager:
         return annotations
 
 
-if __name__ == "__main__":
-    # Doğrudan çalıştırma: veri setini indir ve özet göster
-    manager = DatasetManager()
+def _demo_flores():
+    """FLORES-200'ü indirir ve örnek bir çeviri çifti gösterir."""
+    print("\n" + "=" * 60)
+    print("FLORES-200 (çeviri benchmark)")
+    print("=" * 60)
+    manager = FloresDatasetManager()
     manager.download()
 
     summary = manager.get_summary()
@@ -378,9 +592,88 @@ if __name__ == "__main__":
     for key, val in summary.items():
         print(f"   {key}: {val}")
 
-    print(f"\n📎 İlk 3 örnek:")
-    for sample in manager.get_samples(limit=3):
-        print(f"   🔈 {os.path.basename(sample['audio_path'])}")
-        print(f"      Konuşmacı: {sample['speaker_id']}, Süre: {sample['duration']}s")
-        print(f"      Transkript: {sample['transcript'][:80]}...")
+    print(f"\n📎 İlk 3 paralel çift (en -> tr):")
+    for pair in manager.get_pairs("en", "tr", split="devtest", limit=3):
+        print(f"   [{pair['index']}] SRC: {pair['source'][:70]}")
+        print(f"        REF: {pair['reference'][:70]}")
         print()
+
+
+def _demo_librispeech():
+    """LibriSpeech'i indirir ve özet gösterir (soundfile gerekir, ~350 MB)."""
+    print("\n" + "=" * 60)
+    print("LibriSpeech test-clean (transkripsiyon benchmark)")
+    print("=" * 60)
+    manager = DatasetManager()
+    manager.download()
+
+    try:
+        summary = manager.get_summary()
+        print(f"\n📊 Veri Seti Özeti:")
+        for key, val in summary.items():
+            print(f"   {key}: {val}")
+    except ImportError as e:
+        print(f"⚠️  Özet atlandı: {e}")
+
+
+def _demo_ami():
+    """AMI Meeting Corpus alt kümesini indirir (diarization benchmark)."""
+    print("\n" + "=" * 60)
+    print("AMI Meeting Corpus (diarization benchmark)")
+    print("=" * 60)
+    manager = AmiDiarizationManager()
+    manager.download()
+
+    samples = manager.get_samples()
+    print(f"\n📊 Veri Seti Özeti:")
+    print(f"   meeting_count: {len(samples)}")
+    for s in samples:
+        print(f"   🔈 {s['meeting_id']} | süre: {s['duration']:.1f}s | "
+              f"annotation: {len(s['annotations'])}")
+
+
+# Çalıştırıldığında indirilecek tüm veri setleri (sıra korunur).
+_DATASET_DEMOS = {
+    "flores": _demo_flores,           # çeviri (FLORES-200, ~25 MB)
+    "librispeech": _demo_librispeech, # transkripsiyon (LibriSpeech, ~350 MB)
+    "ami": _demo_ami,                 # diarization (AMI alt kümesi)
+}
+
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+
+    # Windows konsolu (ör. cp1254) emoji çıktısında çökmesin diye UTF-8'e geç.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+    parser = argparse.ArgumentParser(
+        description="Test veri setlerini indir (varsayılan: HEPSİ)."
+    )
+    parser.add_argument(
+        "dataset", nargs="?", default="all",
+        choices=["all"] + list(_DATASET_DEMOS.keys()),
+        help="İndirilecek veri seti (varsayılan: all = tümü).",
+    )
+    args = parser.parse_args()
+
+    selected = _DATASET_DEMOS.keys() if args.dataset == "all" else [args.dataset]
+
+    failures = []
+    for name in selected:
+        try:
+            _DATASET_DEMOS[name]()
+        except Exception as e:
+            failures.append((name, e))
+            print(f"❌ '{name}' hazırlanamadı: {e}")
+
+    print("\n" + "=" * 60)
+    if failures:
+        print(f"⚠️  {len(failures)} veri seti başarısız: "
+              f"{', '.join(n for n, _ in failures)}")
+    else:
+        print("✅ Tüm veri setleri hazır.")
+    print("=" * 60)
