@@ -31,6 +31,8 @@ from ..config import (
     WHISPER_PATH, DIARIZATION_CONFIG_PATH,
     LOCAL_MODELS_DIR,
     DEFAULT_RATE, DEFAULT_CHANNELS, WHISPER_LANGUAGE,
+    WHISPER_NO_SPEECH_THRESHOLD, WHISPER_LOGPROB_THRESHOLD,
+    WHISPER_COMPRESSION_RATIO_THRESHOLD,
     DIARIZATION_WARMUP_MS,
 )
 from ..audio.utils import calculate_chunk_duration_ms
@@ -57,6 +59,27 @@ logger = logging.getLogger(__name__)
 #  ..audio.preprocessing; config plumbing -> diarization_config; SpeakerTracker ->
 #  speaker_tracker; embedding çıkarma -> embedding_extractor. Hepsi buradan geri
 #  export edilir, böylece eski import yolları + subclass'lar aynen çalışır.)
+
+
+def is_whisper_hallucination(segment) -> bool:
+    """Bir Whisper segmenti büyük olasılıkla halüsinasyon mu?
+
+    Canlı sistem sesinde sessizlik/müzik/gürültü, Whisper'ı "Altyazı M.K.",
+    "Thank you" gibi hayalet metin üretmeye iter. faster-whisper'ın segment
+    başına verdiği güven skorlarıyla bunları eler:
+      * compression_ratio yüksek  → aşırı tekrarlı gibberish
+      * no_speech_prob yüksek VE avg_logprob düşük → sessizlik + düşük güven
+    Eşikler config'ten (env ile ayarlanabilir).
+    """
+    text = (getattr(segment, "text", "") or "").strip()
+    if not text:
+        return True
+    if getattr(segment, "compression_ratio", 0.0) > WHISPER_COMPRESSION_RATIO_THRESHOLD:
+        return True
+    if (getattr(segment, "no_speech_prob", 0.0) > WHISPER_NO_SPEECH_THRESHOLD
+            and getattr(segment, "avg_logprob", 0.0) < WHISPER_LOGPROB_THRESHOLD):
+        return True
+    return False
 
 
 class AIWorker:
@@ -265,20 +288,27 @@ class AIWorker:
 
                 results = []
                 for segment in segments:
+                    if is_whisper_hallucination(segment):
+                        continue
                     results.append({
                         "speaker": "Kısmi",
                         "start": segment.start,
                         "end": segment.end,
                         "text": segment.text,
                     })
+                if not results:
+                    return None
                 return {"results": results}
 
             # EĞER FİNAL İSE:
-            # Sadece Whisper ile yüksek kaliteli transkripsiyon yap
+            # Sadece Whisper ile yüksek kaliteli transkripsiyon yap.
+            # condition_on_previous_text=False: chunk-bazlı streaming'de bir chunk'taki
+            # halüsinasyonun sonrakine zincirleme yayılmasını önler.
             segments, _ = self.transcriber.transcribe(
                 audio_np_16k,
                 beam_size=3,
                 word_timestamps=True,
+                condition_on_previous_text=False,
                 language=language or WHISPER_LANGUAGE,
             )
             segments = list(segments)
@@ -288,6 +318,8 @@ class AIWorker:
 
             results = []
             for segment in segments:
+                if is_whisper_hallucination(segment):
+                    continue
                 # Kelime-seviyesi zaman damgalarını sakla — diarization aşamasında
                 # konuşmacı sınırından bölme için kullanılır.
                 words = []
@@ -304,6 +336,9 @@ class AIWorker:
                     "text": segment.text,
                     "words": words,
                 })
+
+            if not results:
+                return None
 
             return {
                 "results": results,
