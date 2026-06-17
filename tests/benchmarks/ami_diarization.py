@@ -57,13 +57,21 @@ def run_diarization_benchmark_raw(max_minutes=None):
     import torch
     try:
         if os.path.exists(DIARIZATION_CONFIG_PATH):
-            diarizer = Pipeline.from_pretrained(DIARIZATION_CONFIG_PATH)
+            # Türkçe karakter ('ü') ve boşluk ('GitHub Desktop') içeren Windows
+            # yolları pyannote'un HuggingFace repo-id doğrulayıcısını kırar. Canlı
+            # sistemle aynı çözümü kullan: config'i Windows 8.3 kısa yola çevirip
+            # ASCII-güvenli geçici dosyadan yükle.
+            from src.core.diarization_config import prepare_runtime_config
+            runtime_config = prepare_runtime_config(DIARIZATION_CONFIG_PATH)
+            diarizer = Pipeline.from_pretrained(runtime_config)
         else:
             diarizer = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=HF_TOKEN)
         if DEVICE == "cuda":
             diarizer.to(torch.device("cuda"))
     except Exception as e:
         print(f"❌ Model yüklenemedi: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
     print(f"\n🔄 [Adım 3/3] {len(samples)} meeting test ediliyor...\n")

@@ -77,6 +77,11 @@ def run_benchmark(limit=20, min_duration=2.0, max_duration=15.0, use_jiwer=False
     print(f"\n🔄 [Adım 3/4] {len(samples)} örnek test ediliyor...\n")
     evaluator = TranscriptionEvaluator(use_jiwer=use_jiwer)
 
+    # RTF (Real-Time Factor) için: toplam inference süresi / toplam ses süresi.
+    # Model YÜKLEME süresi dahil DEĞİL — sadece process_chunk/transcribe ölçülür.
+    total_compute = 0.0
+    timed_audio = 0.0
+
     for i, sample in enumerate(samples, 1):
         fname = os.path.basename(sample["audio_path"])
         print(f"   [{i}/{len(samples)}] {fname} ({sample['duration']:.1f}s)...", end=" ", flush=True)
@@ -94,6 +99,8 @@ def run_benchmark(limit=20, min_duration=2.0, max_duration=15.0, use_jiwer=False
                 hypothesis = " ".join(s.text.strip() for s in segments)
 
             elapsed = time.time() - start_time
+            total_compute += elapsed
+            timed_audio += sample["duration"]
             if hypothesis:
                 eval_result = evaluator.evaluate(
                     reference=sample["transcript"], hypothesis=hypothesis,
@@ -110,6 +117,29 @@ def run_benchmark(limit=20, min_duration=2.0, max_duration=15.0, use_jiwer=False
 
     print("\n📊 [Adım 4/4] Rapor oluşturuluyor...")
     evaluator.print_report()
+
+    # --- Performans / RTF ---
+    try:
+        from src.config import DEVICE
+        device = DEVICE
+    except Exception:
+        device = "?"
+    rtf = (total_compute / timed_audio) if timed_audio > 0 else 0.0
+    print("\n⏱️  Performans (RTF):")
+    print(f"   Cihaz:                {device}")
+    print(f"   Toplam İşlem Süresi:  {total_compute:.1f}s")
+    print(f"   Toplam Ses Süresi:    {timed_audio:.1f}s")
+    print(f"   RTF:                  {rtf:.3f}  (1.0 = gerçek zamanlı, <1 daha hızlı)")
+    if rtf > 0:
+        print(f"   Hız:                  gerçek zamanın {1.0 / rtf:.1f}× katı")
+    # Rapora yazılabilmesi için report nesnesine de iliştir
+    try:
+        evaluator.report.total_compute_time = total_compute
+        evaluator.report.rtf = rtf
+        evaluator.report.device = device
+    except Exception:
+        pass
+
     if csv_path:
         if not os.path.isabs(csv_path):
             from src.config import OUTPUT_DIR
