@@ -166,6 +166,9 @@ class SpeakerTracker:
         for cluster_id, member_indices in valid_clusters.items():
             member_embs = [self._warmup_buffer[i] for i in member_indices]
             centroid = torch.stack(member_embs).mean(dim=0)
+            norm = torch.norm(centroid)
+            if norm > 0:
+                centroid = centroid / norm
             label = self._next_label()
             self.known_speakers[label] = centroid
 

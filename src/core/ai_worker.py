@@ -31,6 +31,8 @@ from ..config import (
     WHISPER_PATH, DIARIZATION_CONFIG_PATH,
     LOCAL_MODELS_DIR,
     DEFAULT_RATE, DEFAULT_CHANNELS, WHISPER_LANGUAGE,
+    WHISPER_NO_SPEECH_THRESHOLD, WHISPER_LOGPROB_THRESHOLD,
+    WHISPER_COMPRESSION_RATIO_THRESHOLD,
     DIARIZATION_WARMUP_MS,
 )
 from ..audio.utils import calculate_chunk_duration_ms
@@ -59,6 +61,27 @@ logger = logging.getLogger(__name__)
 #  export edilir, böylece eski import yolları + subclass'lar aynen çalışır.)
 
 
+def is_whisper_hallucination(segment) -> bool:
+    """Bir Whisper segmenti büyük olasılıkla halüsinasyon mu?
+
+    Canlı sistem sesinde sessizlik/müzik/gürültü, Whisper'ı "Altyazı M.K.",
+    "Thank you" gibi hayalet metin üretmeye iter. faster-whisper'ın segment
+    başına verdiği güven skorlarıyla bunları eler:
+      * compression_ratio yüksek  → aşırı tekrarlı gibberish
+      * no_speech_prob yüksek VE avg_logprob düşük → sessizlik + düşük güven
+    Eşikler config'ten (env ile ayarlanabilir).
+    """
+    text = (getattr(segment, "text", "") or "").strip()
+    if not text:
+        return True
+    if getattr(segment, "compression_ratio", 0.0) > WHISPER_COMPRESSION_RATIO_THRESHOLD:
+        return True
+    if (getattr(segment, "no_speech_prob", 0.0) > WHISPER_NO_SPEECH_THRESHOLD
+            and getattr(segment, "avg_logprob", 0.0) < WHISPER_LOGPROB_THRESHOLD):
+        return True
+    return False
+
+
 class AIWorker:
     """
     Transkripsiyon ve konuşmacı ayrıştırma motoru.
@@ -73,6 +96,7 @@ class AIWorker:
         self.transcriber = None
         self.embedding_model = None
         self.silero_vad = None  # Speech-only embedding için
+        self.vad_utils = None
         self._loaded = False
         self.speaker_tracker = SpeakerTracker()
         self._runtime_config_path = None  # Geçici config dosyası yolu
@@ -147,11 +171,12 @@ class AIWorker:
 
             # Silero VAD: Speech-only embedding extraction için
             try:
-                self.silero_vad, _ = load_silero_vad()
+                self.silero_vad, self.vad_utils = load_silero_vad()
                 print("[AI Worker] Silero VAD loaded (speech-only embedding enabled)")
             except Exception as vad_err:
                 logger.warning("Silero VAD could not be loaded: %s", vad_err)
                 self.silero_vad = None
+                self.vad_utils = None
 
             self.transcriber = WhisperModel(
                 WHISPER_PATH, device=DEVICE, compute_type=COMPUTE_TYPE
@@ -180,12 +205,14 @@ class AIWorker:
 
     def _extract_speech_only(self, waveform_16k_1d):
         """Silero VAD ile speech-only (preprocessing'e delege)."""
-        return extract_speech_only(waveform_16k_1d, self.silero_vad)
+        get_speech_timestamps = self.vad_utils[0] if (self.vad_utils and len(self.vad_utils) > 0) else None
+        return extract_speech_only(waveform_16k_1d, self.silero_vad, get_speech_timestamps)
 
     def _extract_speaker_embeddings(self, waveform_16k, turns):
         """Konuşmacı embedding çıkarma (embedding_extractor'a delege)."""
+        get_speech_timestamps = self.vad_utils[0] if (self.vad_utils and len(self.vad_utils) > 0) else None
         return extract_speaker_embeddings(
-            self.embedding_model, self.silero_vad, waveform_16k, turns
+            self.embedding_model, self.silero_vad, get_speech_timestamps, waveform_16k, turns
         )
 
     def _get_chunk_duration_ms(self, chunk_bytes):
@@ -261,20 +288,27 @@ class AIWorker:
 
                 results = []
                 for segment in segments:
+                    if is_whisper_hallucination(segment):
+                        continue
                     results.append({
                         "speaker": "Kısmi",
                         "start": segment.start,
                         "end": segment.end,
                         "text": segment.text,
                     })
+                if not results:
+                    return None
                 return {"results": results}
 
             # EĞER FİNAL İSE:
-            # Sadece Whisper ile yüksek kaliteli transkripsiyon yap
+            # Sadece Whisper ile yüksek kaliteli transkripsiyon yap.
+            # condition_on_previous_text=False: chunk-bazlı streaming'de bir chunk'taki
+            # halüsinasyonun sonrakine zincirleme yayılmasını önler.
             segments, _ = self.transcriber.transcribe(
                 audio_np_16k,
                 beam_size=3,
                 word_timestamps=True,
+                condition_on_previous_text=False,
                 language=language or WHISPER_LANGUAGE,
             )
             segments = list(segments)
@@ -284,6 +318,8 @@ class AIWorker:
 
             results = []
             for segment in segments:
+                if is_whisper_hallucination(segment):
+                    continue
                 # Kelime-seviyesi zaman damgalarını sakla — diarization aşamasında
                 # konuşmacı sınırından bölme için kullanılır.
                 words = []
@@ -300,6 +336,9 @@ class AIWorker:
                     "text": segment.text,
                     "words": words,
                 })
+
+            if not results:
+                return None
 
             return {
                 "results": results,

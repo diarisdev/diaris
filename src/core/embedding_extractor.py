@@ -20,7 +20,7 @@ MIN_AUDIO_RMS_FOR_EMBEDDING = 0.01       # min RMS enerji — sessizliği filtre
 MAX_EMBED_AUDIO_SEC = 6.0
 
 
-def extract_speaker_embeddings(embedding_model, silero_vad, waveform_16k, turns):
+def extract_speaker_embeddings(embedding_model, silero_vad, get_speech_timestamps, waveform_16k, turns):
     """
     Her konuşmacı için ses bölümlerini ayırıp embedding çıkarır.
 
@@ -33,6 +33,7 @@ def extract_speaker_embeddings(embedding_model, silero_vad, waveform_16k, turns)
     Args:
         embedding_model: pyannote Inference modeli (None ise boş döner)
         silero_vad: speech-only için Silero VAD (None olabilir)
+        get_speech_timestamps: Silero VAD'ın get_speech_timestamps yardımcı fonksiyonu (None olabilir)
         waveform_16k: (1, samples) tensor @16kHz
         turns: [{"start","end","speaker"}, ...]
 
@@ -81,7 +82,7 @@ def extract_speaker_embeddings(embedding_model, silero_vad, waveform_16k, turns)
             spk_audio_raw = spk_audio_raw[:max_samples]
 
         # 3. Speech-only extraction (sessizliği temizle)
-        spk_audio_clean = extract_speech_only(spk_audio_raw, silero_vad)
+        spk_audio_clean = extract_speech_only(spk_audio_raw, silero_vad, get_speech_timestamps)
 
         # Temizlenmiş ses hâlâ yeterli mi?
         if spk_audio_clean.shape[0] < int(MIN_SPEECH_DURATION_FOR_EMBEDDING * 16000):

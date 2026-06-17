@@ -46,6 +46,9 @@ class Settings:
     device: str
     compute_type: str
     whisper_language: str
+    whisper_no_speech_threshold: float
+    whisper_logprob_threshold: float
+    whisper_compression_ratio_threshold: float
     diarization_embedding_threshold: float
     diarization_warmup_ms: int
     candidate_confirmations_needed: int
@@ -84,6 +87,10 @@ def load_settings() -> Settings:
         device=device,
         compute_type="float16" if device == "cuda" else "int8",
         whisper_language=os.getenv("WHISPER_LANGUAGE", "en"),
+        # Whisper halüsinasyon filtresi eşikleri (sessizlik/gürültüde hayalet metni eler)
+        whisper_no_speech_threshold=float(os.getenv("WHISPER_NO_SPEECH_THRESHOLD", "0.6")),
+        whisper_logprob_threshold=float(os.getenv("WHISPER_LOGPROB_THRESHOLD", "-1.0")),
+        whisper_compression_ratio_threshold=float(os.getenv("WHISPER_COMPRESSION_RATIO_THRESHOLD", "2.4")),
         diarization_embedding_threshold=float(os.getenv("DIARIZATION_EMBEDDING_THRESHOLD", "0.66")),
         diarization_warmup_ms=int(os.getenv("DIARIZATION_WARMUP_MS", "20000")),
         candidate_confirmations_needed=int(os.getenv("CANDIDATE_CONFIRMATIONS_NEEDED", "3")),
@@ -157,6 +164,9 @@ DIARIZATION_CONFIG_PATH = str(settings.diarization_config_path)
 DEVICE = settings.device
 COMPUTE_TYPE = settings.compute_type
 WHISPER_LANGUAGE = settings.whisper_language
+WHISPER_NO_SPEECH_THRESHOLD = settings.whisper_no_speech_threshold
+WHISPER_LOGPROB_THRESHOLD = settings.whisper_logprob_threshold
+WHISPER_COMPRESSION_RATIO_THRESHOLD = settings.whisper_compression_ratio_threshold
 DIARIZATION_EMBEDDING_THRESHOLD = settings.diarization_embedding_threshold
 DIARIZATION_WARMUP_MS = settings.diarization_warmup_ms
 CANDIDATE_CONFIRMATIONS_NEEDED = settings.candidate_confirmations_needed
