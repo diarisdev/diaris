@@ -6,6 +6,7 @@ import logging
 import os
 import queue
 import threading
+import time
 import wave
 from dataclasses import dataclass, field
 
@@ -76,12 +77,16 @@ def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None, tran
             source_lang = task.get("source_lang")
             target_lang = task.get("target_lang")
             is_translation_needed = task.get("is_translation_needed", False)
+            captured_at = task.get("captured_at")   # perf: chunk kapanış damgası
+            stt_ms = task.get("stt_ms")
 
             # Run Pyannote diarization in background.
             # Sonuç: konuşmacıya göre bölünmüş, ÇEVRİLMEMİŞ segmentler.
+            _t_diar = time.perf_counter()
             results = ai_worker.run_diarization(
                 waveform_16k, sample_rate, chunk_duration_ms, transcribed_segments
             )
+            diar_ms = (time.perf_counter() - _t_diar) * 1000.0
 
             # Çeviri: konuşmacı sınırından bölme SONRASI. TÜM segmentler TEK batch
             # çağrısında çevrilir — segment başına ayrı çağrı (özellikle yerel CPU
@@ -98,7 +103,16 @@ def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None, tran
             formatted_str = format_results(results, return_str=True)
             if formatted_str:
                 if on_speaker_update:
-                    on_speaker_update({"segment_index": segment_index, "text": formatted_str})
+                    on_speaker_update({
+                        "segment_index": segment_index,
+                        "text": formatted_str,
+                        # perf ölçümü (varlığı consumer'ı etkilemez)
+                        "captured_at": captured_at,
+                        "stt_ms": stt_ms,
+                        "diar_ms": diar_ms,
+                        "chunk_duration_ms": chunk_duration_ms,
+                        "emitted_at": time.time(),
+                    })
                 else:
                     print(f"\n[Diarization Güncellemesi] Segment {segment_index}:\n{formatted_str}\n")
         except Exception:
@@ -155,7 +169,10 @@ def _worker_loop(audio_queue, diarization_queue, ai_worker, translation_engine, 
             source_lang, target_lang = get_lang_pair()
             is_translation_needed = (source_lang.split("-")[0].lower() != target_lang.split("-")[0].lower())
             
+            captured_at = task.get("captured_at")  # perf: chunk kapanış zaman damgası
+            _t_stt = time.perf_counter()
             output = ai_worker.process_chunk(chunk_bytes, is_final=is_final, language=source_lang)
+            stt_ms = (time.perf_counter() - _t_stt) * 1000.0
             if not output:
                 continue
 
@@ -195,7 +212,11 @@ def _worker_loop(audio_queue, diarization_queue, ai_worker, translation_engine, 
                         on_transcription({
                             "type": "final",
                             "segment_index": segment_index,
-                            "text": formatted_str
+                            "text": formatted_str,
+                            # perf ölçümü (varlığı consumer'ı etkilemez)
+                            "captured_at": captured_at,
+                            "stt_ms": stt_ms,
+                            "emitted_at": time.time(),
                         })
                     else:
                         print("\n" + formatted_str + "\n")
@@ -213,6 +234,9 @@ def _worker_loop(audio_queue, diarization_queue, ai_worker, translation_engine, 
                     "source_lang": source_lang,
                     "target_lang": target_lang,
                     "is_translation_needed": is_translation_needed,
+                    # perf: gecikme/RTF için zaman damgaları
+                    "captured_at": captured_at,
+                    "stt_ms": stt_ms,
                 })
                 segment_index += 1
             else:
@@ -279,7 +303,10 @@ def _flush_chunk_if_ready(state: RecordingState, audio_queue) -> bool:
     if state.chunk_buffer:
         audio_queue.put({
             "type": "final",
-            "data": b"".join(state.chunk_buffer)
+            "data": b"".join(state.chunk_buffer),
+            # Performans ölçümü: chunk'ın KAPANDIĞI (son frame yakalandığı) an.
+            # Gecikme metriklerinin referans noktası.
+            "captured_at": time.time(),
         })
     state.reset_chunk()
     return True
