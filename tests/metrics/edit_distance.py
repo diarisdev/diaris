@@ -44,8 +44,12 @@ def levenshtein_sid(ref, hyp) -> tuple[int, int, int]:
     # Deneme 2: jiwer (yüksek optimize C-tabanlı motor, genelde kuruludur)
     try:
         import jiwer
-        measures = jiwer.compute_measures(" ".join(ref), " ".join(hyp))
-        return measures["substitutions"], measures["insertions"], measures["deletions"]
+        ref_s, hyp_s = " ".join(ref), " ".join(hyp)
+        if hasattr(jiwer, "process_words"):          # jiwer >= 3.0
+            out = jiwer.process_words(ref_s, hyp_s)
+            return out.substitutions, out.insertions, out.deletions
+        m = jiwer.compute_measures(ref_s, hyp_s)     # jiwer < 3.0
+        return m["substitutions"], m["insertions"], m["deletions"]
     except Exception:
         pass
 

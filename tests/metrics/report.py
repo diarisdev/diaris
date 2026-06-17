@@ -11,6 +11,22 @@ from dataclasses import dataclass, field
 from .edit_distance import levenshtein_sid
 from .wer import normalize_text as _normalize_text
 
+
+def _jiwer_word_measures(jiwer, ref_norm, hyp_norm):
+    """jiwer sürümleri arası uyumlu kelime metrikleri.
+
+    jiwer 3.x'te `compute_measures` kaldırıldı; yerine `process_words` geldi
+    (WordOutput → .wer/.substitutions/.insertions/.deletions). 2.x'te eski
+    `compute_measures` sözlüğü kullanılır.
+
+    Returns: (wer, substitutions, insertions, deletions)
+    """
+    if hasattr(jiwer, "process_words"):           # jiwer >= 3.0
+        out = jiwer.process_words(ref_norm, hyp_norm)
+        return out.wer, out.substitutions, out.insertions, out.deletions
+    m = jiwer.compute_measures(ref_norm, hyp_norm)  # jiwer < 3.0
+    return m["wer"], m["substitutions"], m["insertions"], m["deletions"]
+
 try:
     from pyannote.core import Annotation, Segment
     from pyannote.metrics.diarization import DiarizationErrorRate
@@ -150,11 +166,9 @@ class TranscriptionEvaluator:
         hyp_words = hyp_norm.split()
 
         if self.use_jiwer and self._jiwer:
-            measures = self._jiwer.compute_measures(ref_norm, hyp_norm)
-            wer = measures["wer"]
-            insertions = measures["insertions"]
-            deletions = measures["deletions"]
-            substitutions = measures["substitutions"]
+            wer, substitutions, insertions, deletions = _jiwer_word_measures(
+                self._jiwer, ref_norm, hyp_norm
+            )
         else:
             substitutions, insertions, deletions = self._levenshtein_ops(ref_words, hyp_words)
             total_errors = substitutions + insertions + deletions
