@@ -9,6 +9,7 @@ from src.audio.device import list_loopback_devices
 from src.pipeline import run
 from src.ui.subtitle_overlay import SubtitleOverlay
 from src.ui.tray import SystemTrayController
+from src.ui.resources import app_icon
 
 class PipelineSignals(QtCore.QObject):
     status_changed = QtCore.Signal(str)
@@ -19,7 +20,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         
-        self.setWindowTitle("Audio Process AI")
+        self.setWindowTitle("ÇOKLU KONUŞMACI GERÇEK ZAMANLI YAPAY ZEKÂ ÇEVİRİ SİSTEMİ")
+        self.setWindowIcon(app_icon())
         self.resize(800, 850)
         self.setMinimumSize(720, 800)
         
