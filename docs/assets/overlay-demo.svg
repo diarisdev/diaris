@@ -1,0 +1,46 @@
+<svg width="980" height="240" viewBox="0 0 980 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Subtitle overlay demo">
+  <defs>
+    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a2233"/>
+      <stop offset="100%" stop-color="#121826"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0c0f14" stop-opacity="0.92"/>
+      <stop offset="100%" stop-color="#0c0f14" stop-opacity="0.84"/>
+    </linearGradient>
+  </defs>
+
+  <!-- backdrop suggesting a video playing behind the overlay -->
+  <rect width="980" height="240" rx="14" fill="url(#page)"/>
+  <g opacity="0.25">
+    <circle cx="130" cy="70" r="46" fill="#3a5f7d"/>
+    <rect x="640" y="30" width="280" height="10" rx="5" fill="#3a5f7d"/>
+    <rect x="640" y="52" width="220" height="10" rx="5" fill="#3a5f7d"/>
+    <rect x="60" y="150" width="180" height="10" rx="5" fill="#3a5f7d"/>
+  </g>
+
+  <!-- glassmorphic overlay panel -->
+  <g>
+    <rect x="90" y="52" width="800" height="150" rx="14" fill="url(#glass)" stroke="#ffffff" stroke-opacity="0.14"/>
+    <g font-family="Segoe UI, Arial, sans-serif" font-size="17">
+      <!-- line 1: speaker 1 -->
+      <text x="118" y="94" fill="#3498db" font-weight="700" font-size="15">SPEAKER_00:</text>
+      <text x="240" y="94" fill="#3498db">The training loss looks stable, we can push the new build tonight.</text>
+      <!-- line 2: speaker 2 -->
+      <text x="118" y="128" fill="#2ecc71" font-weight="700" font-size="15">SPEAKER_01:</text>
+      <text x="240" y="128" fill="#2ecc71">Agreed — let's ship it and monitor the dashboards.</text>
+      <!-- live partial line -->
+      <text x="118" y="166" fill="#aaaaaa" font-weight="700" font-size="15">[Live]:</text>
+      <text x="240" y="166" fill="#dddddd" font-style="italic">okay so the next item on the agenda is…</text>
+    </g>
+    <!-- resize grip -->
+    <g stroke="#8a93a3" stroke-width="2" opacity="0.7">
+      <line x1="862" y1="192" x2="876" y2="178"/>
+      <line x1="868" y1="194" x2="878" y2="184"/>
+    </g>
+  </g>
+
+  <!-- caption -->
+  <text x="490" y="228" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif"
+        font-size="13" fill="#8a93a3">Always-on-top subtitle overlay — per-speaker colours, live partial line, drag &amp; resize, click-through</text>
+</svg>

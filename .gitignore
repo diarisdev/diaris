@@ -176,7 +176,11 @@ system_recorded.wav
 output/*.wav
 output/results.csv
 
-# Docs
-/docs
+# Docs: üretilen/geçici doküman içeriği ignore edilir; README'nin kullandığı
+# commit'li görseller (docs/assets) hariç tutulur. NOT: "/docs" yerine
+# "/docs/*" kullanılıyor — git, ebeveyn dizini komple ignore edilmiş dosyaların
+# içini "!" ile geri alamaz.
+/docs/*
+!/docs/assets/
 
 cuda_compat/
