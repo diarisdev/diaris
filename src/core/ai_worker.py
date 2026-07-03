@@ -10,13 +10,15 @@ Warm-up mekanizması:
 - Sonrasında yeni chunk'lar bu baseline'lara göre eşlenir
 
 İyileştirmeler:
-- RMS normalizasyon (peak yerine)
-- Bandpass filter (200-3500 Hz) — embedding çıkarmadan önce
+- Konuşma-seviyesi RMS normalizasyon (kazanç sınırlı — gürültü şişirilmez)
 - Speech-only embedding (Silero VAD ile sessizlik temizleme)
+- En-enerjili 6 sn embedding ses seçimi (ilk 6 sn yerine)
 - İki-aşamalı warm-up clustering (pairwise similarity + küçük küme filtreleme)
 - Noisy embedding filtreleme (min süre, min enerji)
-- Confidence-weighted baseline güncelleme
+- Rezervuar tabanlı konuşmacı eşleme (konuşmacı başına K embedding)
 - Speaker label smoothing (< 1s segmentleri birleştir)
+- Overlap taşıma desteği: max-süre kesmelerinde önceki chunk'ın kuyruğu
+  bağlam olarak gelir, transkripsiyondan kırpılır (trim_prefix_ms)
 """
 
 import logging
@@ -61,6 +63,29 @@ logger = logging.getLogger(__name__)
 #  export edilir, böylece eski import yolları + subclass'lar aynen çalışır.)
 
 
+# Bilinen loopback halüsinasyonları: sessizlik/müzik/jenerik üzerinde Whisper'ın
+# ürettiği kalıp metinler (YouTube altyazı kredileri, kapanış selamları vb.).
+# Yalnızca segmentin TAMAMI bu kalıplardan biriyse VE güven sinyalleri zayıfsa
+# elenir — gerçek bir "Thank you." cümlesi güçlü skorlarla geçer.
+KNOWN_HALLUCINATION_TEXTS = frozenset({
+    "altyazı m.k.",
+    "altyazı m.k",
+    "thank you.",
+    "thank you",
+    "thanks for watching.",
+    "thanks for watching",
+    "thank you for watching.",
+    "thank you for watching",
+    "izlediğiniz için teşekkürler.",
+    "izlediğiniz için teşekkürler",
+    "izlediğiniz için teşekkür ederim.",
+    "abone olmayı unutmayın.",
+    "you",
+    "bye.",
+    "bye bye.",
+})
+
+
 def is_whisper_hallucination(segment) -> bool:
     """Bir Whisper segmenti büyük olasılıkla halüsinasyon mu?
 
@@ -69,6 +94,7 @@ def is_whisper_hallucination(segment) -> bool:
     başına verdiği güven skorlarıyla bunları eler:
       * compression_ratio yüksek  → aşırı tekrarlı gibberish
       * no_speech_prob yüksek VE avg_logprob düşük → sessizlik + düşük güven
+      * bilinen kalıp metin VE orta düzeyde zayıf güven → kalıp halüsinasyon
     Eşikler config'ten (env ile ayarlanabilir).
     """
     text = (getattr(segment, "text", "") or "").strip()
@@ -76,10 +102,49 @@ def is_whisper_hallucination(segment) -> bool:
         return True
     if getattr(segment, "compression_ratio", 0.0) > WHISPER_COMPRESSION_RATIO_THRESHOLD:
         return True
-    if (getattr(segment, "no_speech_prob", 0.0) > WHISPER_NO_SPEECH_THRESHOLD
-            and getattr(segment, "avg_logprob", 0.0) < WHISPER_LOGPROB_THRESHOLD):
+    no_speech_prob = getattr(segment, "no_speech_prob", 0.0)
+    avg_logprob = getattr(segment, "avg_logprob", 0.0)
+    if no_speech_prob > WHISPER_NO_SPEECH_THRESHOLD and avg_logprob < WHISPER_LOGPROB_THRESHOLD:
+        return True
+    # Kalıp-metin kontrolü: tek başına metin eşleşmesi yetmez; sessizlik
+    # olasılığı ya da düşük ortalama logprob da eşlik etmeli.
+    if text.lower() in KNOWN_HALLUCINATION_TEXTS and (
+        no_speech_prob > 0.3 or avg_logprob < -0.5
+    ):
         return True
     return False
+
+
+def _trim_transcribed_prefix(results: list, trim_prefix_s: float) -> list:
+    """Overlap taşımasıyla gelen, ZATEN transkribe edilmiş öneki kırpar.
+
+    Kelime damgası olan segmentlerde kelime orta noktası trim sınırından önce
+    kalanlar atılır (metin kalan kelimelerden yeniden kurulur); kelime damgası
+    olmayan segmentlerde segment sonu sınırın gerisindeyse segment atılır.
+    Zaman damgaları chunk-göreli bırakılır (diarization aynı waveform'u görür).
+    """
+    if trim_prefix_s <= 0:
+        return results
+
+    trimmed = []
+    for seg in results:
+        words = seg.get("words") or []
+        if not words:
+            if seg["end"] > trim_prefix_s:
+                trimmed.append(seg)
+            continue
+        kept = [w for w in words if (w["start"] + w["end"]) / 2.0 >= trim_prefix_s]
+        if not kept:
+            continue
+        new_seg = dict(seg)
+        new_seg["words"] = kept
+        new_seg["start"] = kept[0]["start"]
+        new_seg["end"] = kept[-1]["end"]
+        # faster-whisper kelimeleri başlarında boşluk taşır → doğrudan birleştir.
+        new_seg["text"] = "".join(w["word"] for w in kept).strip()
+        if new_seg["text"]:
+            trimmed.append(new_seg)
+    return trimmed
 
 
 class AIWorker:
@@ -192,8 +257,8 @@ class AIWorker:
             return False
 
     def _to_mono_float32(self, audio_np_int16):
-        """Stereo int16 → mono float32, RMS normalized (preprocessing'e delege)."""
-        return to_mono_float32(audio_np_int16)
+        """Çok kanallı int16 → mono float32, normalize (preprocessing'e delege)."""
+        return to_mono_float32(audio_np_int16, rate=self.rate)
 
     def _resample_for_pyannote(self, mono_float32):
         """16kHz'e resample (preprocessing'e delege)."""
@@ -244,7 +309,7 @@ class AIWorker:
 
         return smoothed
 
-    def process_chunk(self, chunk_bytes, is_final=True, language=None):
+    def process_chunk(self, chunk_bytes, is_final=True, language=None, trim_prefix_ms=0):
         """
         Bir ses parçasını işler: transkripsiyon yapar.
 
@@ -252,12 +317,18 @@ class AIWorker:
             chunk_bytes: Ham ses verisi (bytes, int16)
             is_final: Eğer False ise sadece hızlı transkripsiyon yapılır (diarization pas geçilir)
             language: Transkripsiyon için dil kodu (örn. 'en', 'tr'). Belirtilmezse varsayılan WHISPER_LANGUAGE kullanılır.
+            trim_prefix_ms: Önceki chunk'tan overlap ile taşınan ve ZATEN
+                transkribe edilmiş önek (ms). Bu bölgedeki kelimeler sonuçtan
+                kırpılır (çift sayım olmaz); ses yine de Whisper'a tam bağlam
+                olarak verilir.
 
         Returns:
             dict: Sonuçları ve diarization için gerekli waveform bilgilerini içeren dict.
         """
         if not self._loaded:
             return None
+
+        trim_prefix_s = max(0.0, trim_prefix_ms / 1000.0)
 
         if len(chunk_bytes) == 0:
             return None
@@ -290,6 +361,9 @@ class AIWorker:
                 for segment in segments:
                     if is_whisper_hallucination(segment):
                         continue
+                    # Overlap öneki: kelime damgası yok → segment-seviyesi kırpma.
+                    if trim_prefix_s > 0 and segment.end <= trim_prefix_s:
+                        continue
                     results.append({
                         "speaker": "Kısmi",
                         "start": segment.start,
@@ -304,12 +378,19 @@ class AIWorker:
             # Sadece Whisper ile yüksek kaliteli transkripsiyon yap.
             # condition_on_previous_text=False: chunk-bazlı streaming'de bir chunk'taki
             # halüsinasyonun sonrakine zincirleme yayılmasını önler.
+            # vad_filter + hallucination_silence_threshold: chunk'lar artık ham
+            # sessizlik/hangover da içerdiğinden (VAD sesi yeniden yazmıyor),
+            # faster-whisper'ın kendi Silero filtresi ikinci bir güvenlik ağıdır;
+            # zaman damgaları orijinal eksene geri eşlenir.
             segments, _ = self.transcriber.transcribe(
                 audio_np_16k,
-                beam_size=3,
+                beam_size=5,
                 word_timestamps=True,
                 condition_on_previous_text=False,
                 language=language or WHISPER_LANGUAGE,
+                vad_filter=True,
+                vad_parameters={"min_silence_duration_ms": 500},
+                hallucination_silence_threshold=2.0,
             )
             segments = list(segments)
 
@@ -336,6 +417,9 @@ class AIWorker:
                     "text": segment.text,
                     "words": words,
                 })
+
+            # Overlap öneki (önceki chunk'ta zaten transkribe edildi) kırpılır.
+            results = _trim_transcribed_prefix(results, trim_prefix_s)
 
             if not results:
                 return None

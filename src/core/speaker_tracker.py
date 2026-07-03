@@ -1,8 +1,19 @@
 """SpeakerTracker — embedding tabanlı konuşmacı kimlik takibi.
 
-ai_worker.py'den ayrıldı (saf taşıma; davranış birebir aynı). ai_worker bunu geri
-export eder; `from src.core.ai_worker import SpeakerTracker` ve subclass'lar
-(EvalSpeakerTracker) aynen çalışmaya devam eder.
+ai_worker.py'den ayrıldı; ai_worker bunu geri export eder; `from
+src.core.ai_worker import SpeakerTracker` ve subclass'lar (EvalSpeakerTracker)
+aynen çalışmaya devam eder.
+
+Rezervuar modeli
+----------------
+Konuşmacı başına TEK centroid, ses tonu/kanal değişimlerine karşı kırılgandı:
+centroid "ortalama bir sese" yakınsadıkça ya herkes ona benziyor (over-collapse)
+ya da aynı kişinin farklı konuşma tarzları eşiğin altında kalıyordu. Artık her
+konuşmacı için son K kaliteli embedding bir REZERVUARDA tutulur; benzerlik
+skoru, rezervuar + centroid adaylarının en iyi ikisinin ortalamasıdır. Centroid
+rezervuarın normalize ortalaması olarak korunur (eski API'ler — known_speakers
+dict'i — birebir çalışır; EvalSpeakerTracker gibi subclass'lar rezervuarsız
+konuşmacı yazarsa skor otomatik centroid-only'ye düşer).
 """
 
 import torch
@@ -14,13 +25,27 @@ from ..config import (
 )
 
 
+def _cosine(a: torch.Tensor, b: torch.Tensor) -> float:
+    return torch.nn.functional.cosine_similarity(
+        a.unsqueeze(0), b.unsqueeze(0)
+    ).item()
+
+
+def _normalized_mean(embeddings: list) -> torch.Tensor:
+    centroid = torch.stack(embeddings).mean(dim=0)
+    norm = torch.norm(centroid)
+    if norm > 0:
+        centroid = centroid / norm
+    return centroid
+
+
 class SpeakerTracker:
     """
     Embedding-based konuşmacı takip sistemi (warm-up destekli).
-    
+
     Faz 1 (Warm-up): Kaliteli embedding'ler toplanır, kümelenir.
-    Faz 2 (Aktif):   Yeni embedding'ler baseline'larla karşılaştırılır.
-                      Güncelleme confidence-weighted yapılır.
+    Faz 2 (Aktif):   Yeni embedding'ler konuşmacı rezervuarlarıyla karşılaştırılır;
+                      güçlü eşleşmeler rezervuara eklenir (centroid türetilir).
 
     Yeni konuşmacı ekleme: Onay tamponu (confirmation buffer) sistemi.
     - Bilinmeyen bir ses ilk görüldüğünde hemen konuşmacı oluşturulmaz.
@@ -35,12 +60,17 @@ class SpeakerTracker:
     CANDIDATE_TTL = CANDIDATE_TTL                                     # Onaylanmayan adaylar kaç chunk sonra silinir
     CANDIDATE_SELF_SIMILARITY = CANDIDATE_SELF_SIMILARITY             # Aday embedding'lerin kendi aralarındaki min benzerlik
 
+    # Rezervuar sabitleri
+    RESERVOIR_SIZE = 8            # konuşmacı başına saklanan max embedding
+    RESERVOIR_ADD_THRESHOLD = 0.85  # rezervuara ekleme için min eşleşme skoru (drift önleme)
+
     def __init__(self, threshold=None, warmup_ms=None):
         self.threshold = threshold if threshold is not None else DIARIZATION_EMBEDDING_THRESHOLD
         self.warmup_ms = warmup_ms if warmup_ms is not None else DIARIZATION_WARMUP_MS
 
         # Bilinen konuşmacılar (warm-up sonrası dolu olur)
-        self.known_speakers = {}  # {global_label: embedding_tensor}
+        self.known_speakers = {}  # {global_label: centroid_tensor}
+        self._reservoirs = {}     # {global_label: [embedding_tensor, ...]} (en yeni sonda)
         self._next_id = 0
 
         # Warm-up state
@@ -56,6 +86,7 @@ class SpeakerTracker:
     def reset(self):
         """Tracker durumunu sıfırlayarak yeni bir dosya için hazır hale getirir."""
         self.known_speakers = {}
+        self._reservoirs = {}
         self._next_id = 0
         self._warmup_buffer = []
         self._warmup_audio_ms = 0
@@ -72,6 +103,50 @@ class SpeakerTracker:
     def is_warming_up(self):
         return not self._warmup_complete
 
+    # ------------------------------------------------------------------ #
+    # Rezervuar yardımcıları
+    # ------------------------------------------------------------------ #
+    def _register_speaker(self, embeddings: list) -> str:
+        """Yeni konuşmacı oluşturur: rezervuar + normalize centroid."""
+        label = self._next_label()
+        reservoir = [e.cpu() for e in embeddings[-self.RESERVOIR_SIZE:]]
+        self._reservoirs[label] = reservoir
+        self.known_speakers[label] = _normalized_mean(reservoir)
+        return label
+
+    def _add_observation(self, label: str, emb: torch.Tensor) -> None:
+        """Güçlü eşleşen embedding'i rezervuara ekler, centroid'i türetir."""
+        reservoir = self._reservoirs.get(label)
+        if reservoir is None:
+            # Subclass/dış kod konuşmacıyı doğrudan known_speakers'a yazmış
+            # olabilir — mevcut centroid'i tohum olarak koru.
+            existing = self.known_speakers.get(label)
+            reservoir = [existing.clone()] if existing is not None else []
+            self._reservoirs[label] = reservoir
+        reservoir.append(emb.clone())
+        if len(reservoir) > self.RESERVOIR_SIZE:
+            reservoir.pop(0)
+        self.known_speakers[label] = _normalized_mean(reservoir)
+
+    def _similarity(self, emb: torch.Tensor, label: str) -> float:
+        """Konuşmacı skoru: rezervuar+centroid benzerliklerinin en iyi ikisinin
+        ortalaması. Tek centroid'e göre konuşmacı-içi varyasyona çok daha
+        dayanıklı; tek örnekli konuşmacıda centroid-only'ye düşer.
+        """
+        candidates = list(self._reservoirs.get(label, []))
+        centroid = self.known_speakers.get(label)
+        if centroid is not None:
+            candidates.append(centroid)
+        if not candidates:
+            return -1.0
+        sims = sorted((_cosine(emb, c) for c in candidates), reverse=True)
+        if len(sims) >= 2:
+            return (sims[0] + sims[1]) / 2.0
+        return sims[0]
+
+    # ------------------------------------------------------------------ #
+    # Warm-up
+    # ------------------------------------------------------------------ #
     def add_warmup_embedding(self, embedding, chunk_duration_ms):
         """
         Warm-up fazında embedding toplar.
@@ -103,8 +178,7 @@ class SpeakerTracker:
 
         if n == 1:
             # Tek embedding varsa direkt konuşmacı oluştur
-            label = self._next_label()
-            self.known_speakers[label] = self._warmup_buffer[0]
+            label = self._register_speaker([self._warmup_buffer[0]])
             self._warmup_complete = True
             self._warmup_buffer = []
             print(f"[Warm-up Complete] 1 speaker detected: {label}")
@@ -118,7 +192,6 @@ class SpeakerTracker:
         )  # (n, n)
 
         # Agglomerative clustering — her embedding kendi kümesi olarak başlar
-        cluster_ids = list(range(n))
         clusters = {i: [i] for i in range(n)}
 
         # Merge: en yüksek similarity'den başla
@@ -162,15 +235,10 @@ class SpeakerTracker:
             largest = max(clusters.items(), key=lambda x: len(x[1]))
             valid_clusters = {largest[0]: largest[1]}
 
-        # Her kümeden konuşmacı oluştur
-        for cluster_id, member_indices in valid_clusters.items():
+        # Her kümeden konuşmacı oluştur (rezervuar = küme üyeleri)
+        for member_indices in valid_clusters.values():
             member_embs = [self._warmup_buffer[i] for i in member_indices]
-            centroid = torch.stack(member_embs).mean(dim=0)
-            norm = torch.norm(centroid)
-            if norm > 0:
-                centroid = centroid / norm
-            label = self._next_label()
-            self.known_speakers[label] = centroid
+            self._register_speaker(member_embs)
 
         self._warmup_complete = True
 
@@ -186,6 +254,9 @@ class SpeakerTracker:
 
         self._warmup_buffer = []
 
+    # ------------------------------------------------------------------ #
+    # Aday tamponu
+    # ------------------------------------------------------------------ #
     def _find_matching_candidate(self, emb):
         """
         Aday tamponunda bu embedding'e benzer bir aday var mı?
@@ -193,10 +264,7 @@ class SpeakerTracker:
         """
         for idx, cand in enumerate(self._candidates):
             centroid = torch.stack(cand["embeddings"]).mean(dim=0)
-            score = torch.nn.functional.cosine_similarity(
-                emb.unsqueeze(0), centroid.unsqueeze(0)
-            ).item()
-            if score >= self.CANDIDATE_SELF_SIMILARITY:
+            if _cosine(emb, centroid) >= self.CANDIDATE_SELF_SIMILARITY:
                 return idx
         return -1
 
@@ -218,22 +286,13 @@ class SpeakerTracker:
             pair_scores = []
             for i in range(len(embs)):
                 for j in range(i + 1, len(embs)):
-                    s = torch.nn.functional.cosine_similarity(
-                        embs[i].unsqueeze(0), embs[j].unsqueeze(0)
-                    ).item()
-                    pair_scores.append(s)
+                    pair_scores.append(_cosine(embs[i], embs[j]))
             avg_self_sim = sum(pair_scores) / len(pair_scores)
             if avg_self_sim < self.CANDIDATE_SELF_SIMILARITY:
                 return None
 
-        # Onaylandı — yeni konuşmacı oluştur
-        centroid = torch.stack(embs).mean(dim=0)
-        norm = torch.norm(centroid)
-        if norm > 0:
-            centroid = centroid / norm
-        new_label = self._next_label()
-        self.known_speakers[new_label] = centroid
-        return new_label
+        # Onaylandı — yeni konuşmacı oluştur (aday gözlemleri rezervuarı tohumlar)
+        return self._register_speaker(embs)
 
     def _expire_old_candidates(self):
         """TTL süresi dolan adayları temizler."""
@@ -250,7 +309,7 @@ class SpeakerTracker:
         konuşmacıya bölmüş olabilir; üstelik warm-up'ta belirlenen sayı kalıcı.
         Bu güvenlik ağı, centroid'leri merge_threshold'u aşan konuşmacıları
         tek etikete indirir (düşük id'li korunur), böylece şişen sayı zamanla
-        kendiliğinden düzelir.
+        kendiliğinden düzelir. Rezervuarlar da birleştirilir.
 
         Returns:
             dict: {silinen_etiket: korunan_etiket} — çağıran, mevcut chunk'ın
@@ -265,30 +324,32 @@ class SpeakerTracker:
             while j < len(labels):
                 drop = labels[j]
                 if keep in self.known_speakers and drop in self.known_speakers:
-                    sim = torch.nn.functional.cosine_similarity(
-                        self.known_speakers[keep].unsqueeze(0),
-                        self.known_speakers[drop].unsqueeze(0),
-                    ).item()
+                    sim = _cosine(self.known_speakers[keep], self.known_speakers[drop])
                     if sim >= merge_threshold:
-                        centroid = (self.known_speakers[keep] + self.known_speakers[drop]) / 2.0
-                        norm = torch.norm(centroid)
-                        if norm > 0:
-                            centroid = centroid / norm
-                        self.known_speakers[keep] = centroid
+                        merged_reservoir = (
+                            self._reservoirs.get(keep, [self.known_speakers[keep]])
+                            + self._reservoirs.get(drop, [self.known_speakers[drop]])
+                        )[-self.RESERVOIR_SIZE:]
+                        self._reservoirs[keep] = merged_reservoir
+                        self.known_speakers[keep] = _normalized_mean(merged_reservoir)
                         del self.known_speakers[drop]
+                        self._reservoirs.pop(drop, None)
                         remap[drop] = keep
                         labels.pop(j)
-                        print(f"  [Merge] {drop} → {keep} (sim: {sim:.3f})")
+                        print(f"  [Merge] {drop} -> {keep} (sim: {sim:.3f})")
                         continue
                 j += 1
             i += 1
         return remap
 
+    # ------------------------------------------------------------------ #
+    # Aktif faz eşleme
+    # ------------------------------------------------------------------ #
     def map_speakers(self, embeddings_dict, quality_dict=None):
         """
         Embedding'lere göre konuşmacıları eşler (warm-up sonrası).
-        Confidence-weighted baseline güncelleme yapar.
-        Bilinmeyen sesler için onay tamponu kullanır.
+        Güçlü eşleşmeler konuşmacı rezervuarına eklenir.
+        Bilinmeyen sesler için onay tamponu kullanılır.
 
         Args:
             embeddings_dict: {local_label: embedding_tensor}
@@ -311,14 +372,12 @@ class SpeakerTracker:
             duration = quality_dict.get(local_label, float("inf"))
             is_reliable = duration >= MIN_NEW_SPEAKER_DURATION
 
-            # Bilinen konuşmacılarla karşılaştır
+            # Bilinen konuşmacılarla karşılaştır (rezervuar skoru)
             best_match = None
             best_score = -1.0
 
-            for global_label, known_emb in self.known_speakers.items():
-                score = torch.nn.functional.cosine_similarity(
-                    emb.unsqueeze(0), known_emb.unsqueeze(0)
-                ).item()
+            for global_label in self.known_speakers:
+                score = self._similarity(emb, global_label)
                 if score > best_score:
                     best_score = score
                     best_match = global_label
@@ -326,20 +385,11 @@ class SpeakerTracker:
             if best_match and best_score >= self.threshold:
                 mapping[local_label] = best_match
 
-                # Centroid drift'i önle: baseline'ı YALNIZCA yüksek güvende
-                # güncelle. Borderline eşleşmeler (0.70-0.85) centroid'i yavaşça
-                # "ortalama bir ses"e kaydırıp baskın konuşmacının herkese
-                # benzemesine yol açıyordu (AMI over-collapse). Artık sadece
-                # >0.85 skorlu, kesin eşleşmeler küçük bir adımla günceller.
-                if best_score > 0.85:
-                    alpha = 0.8  # eski centroid ağırlığı (küçük hareket)
-                    self.known_speakers[best_match] = (
-                        alpha * self.known_speakers[best_match] + (1 - alpha) * emb
-                    )
-                    # Re-normalize baseline to prevent magnitude decay
-                    norm = torch.norm(self.known_speakers[best_match])
-                    if norm > 0:
-                        self.known_speakers[best_match] /= norm
+                # Drift'i önle: rezervuara YALNIZCA yüksek güvenli eşleşmeler
+                # eklenir. Borderline eşleşmeler (threshold–0.85) rezervuarı
+                # kirletip baskın konuşmacının herkese benzemesine yol açabilir.
+                if best_score > self.RESERVOIR_ADD_THRESHOLD:
+                    self._add_observation(best_match, emb)
 
             elif not is_reliable:
                 # Bilinmeyen AMA kısa/güvenilmez ses → yeni konuşmacı YARATMA.
@@ -347,18 +397,12 @@ class SpeakerTracker:
                 # cümlelerin ("evet") yeni konuşmacı doğurmasını engeller.
                 mapping[local_label] = best_match if best_match else "Unknown"
                 if best_match:
-                    print(f"  [Short utterance] sticky → {best_match} "
+                    print(f"  [Short utterance] sticky -> {best_match} "
                           f"(score: {best_score:.3f}, {duration:.1f}s)")
 
             else:
                 # Bilinmeyen VE güvenilir (yeterince uzun) ses
                 # — aday tamponuna ekle veya mevcut adayı onayla.
-                # NOT: Eski "belirsizlik bandı" (threshold-0.15 ile threshold arası)
-                # bu sesleri zorla en yakın baskın konuşmacıya atıyordu ve farklı
-                # gerçek konuşmacıları yutuyordu. O dal kaldırıldı; eşik altındaki
-                # güvenilir sesler artık aday tamponundan geçip kendi konuşmacı
-                # etiketini oluşturabilir. Aday kapısı (CONFIRMATIONS=4,
-                # SELF_SIMILARITY=0.78) hayalet konuşmacıları yine de bastırır.
                 cand_idx = self._find_matching_candidate(emb)
 
                 if cand_idx >= 0:
@@ -371,7 +415,9 @@ class SpeakerTracker:
                         mapping[local_label] = promoted_label
                         closest_info = f" (closest: {best_match}, score: {best_score:.3f})" if best_match else ""
                         confirms = len(self._candidates[cand_idx]["embeddings"])
-                        print(f"  🆕 New speaker: {promoted_label}{closest_info} [confirmed after {confirms} observations]")
+                        # ASCII-only: emoji cp1254/cp1252 Windows konsollarında
+                        # UnicodeEncodeError ile canlı akışı düşürüyordu.
+                        print(f"  [New speaker] {promoted_label}{closest_info} [confirmed after {confirms} observations]")
                         self._candidates.pop(cand_idx)
                     else:
                         # Henüz yeterli onay yok — en yakın bilinen konuşmacıya ata
@@ -400,8 +446,11 @@ class SpeakerTracker:
         return mapping
 
     def map_speakers_fallback(self, local_labels):
-        """Embedding yoksa fallback — her label'a yeni isim atar."""
-        mapping = {}
-        for label in local_labels:
-            mapping[label] = self._next_label()
-        return mapping
+        """Embedding çıkarılamadığında (çok kısa/sessiz chunk) fallback.
+
+        Eski davranış her local label'a YENİ bir global etiket uyduruyordu;
+        embedding'i olmayan bu 'hayalet' konuşmacılar hiçbir zaman eşlenemediği
+        için konuşmacı sayısını şişiriyordu (CHiME-6 over-count'un ana kaynağı).
+        Artık kimliklendirilemeyen ses dürüstçe 'Unknown' etiketlenir.
+        """
+        return {label: "Unknown" for label in local_labels}

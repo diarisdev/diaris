@@ -36,6 +36,8 @@ class Settings:
     short_silence_limit: int
     soft_chunk_duration_ms: int
     max_chunk_duration_ms: int
+    pre_roll_ms: int
+    chunk_overlap_ms: int
     vad_aggressiveness: int
     silero_threshold: float
     hf_token: str | None
@@ -55,6 +57,28 @@ class Settings:
     candidate_ttl: int
     candidate_self_similarity: float
     min_new_speaker_duration: float
+
+
+def _resolve_whisper_path(local_models_dir: Path, device: str) -> Path:
+    """Whisper model dizinini seçer.
+
+    WHISPER_MODEL env ile açıkça verilebilir (models/ altındaki dizin adı veya
+    mutlak yol). Verilmezse: GPU'da whisper-medium (varsa) tercih edilir —
+    RTF ~0.1x olduğundan bolca marj var ve medium konuşma dilinde küçük modele
+    göre belirgin daha düşük WER verir. CPU'da (int8) whisper-small kalır.
+    """
+    explicit = os.getenv("WHISPER_MODEL", "").strip()
+    if explicit:
+        candidate = Path(explicit)
+        if not candidate.is_absolute():
+            candidate = local_models_dir / explicit
+        return candidate
+
+    if device == "cuda":
+        medium = local_models_dir / "whisper-medium"
+        if medium.is_dir():
+            return medium
+    return local_models_dir / "whisper-small"
 
 
 def load_settings() -> Settings:
@@ -77,11 +101,23 @@ def load_settings() -> Settings:
         short_silence_limit=int(os.getenv("SHORT_SILENCE_LIMIT", "15")),
         soft_chunk_duration_ms=int(os.getenv("SOFT_CHUNK_DURATION_MS", "5000")),
         max_chunk_duration_ms=int(os.getenv("MAX_CHUNK_DURATION_MS", "10000")),
-        vad_aggressiveness=int(os.getenv("VAD_AGGRESSIVENESS", "1")),
-        silero_threshold=float(os.getenv("SILERO_THRESHOLD", "0.25")),
+        # Pre-roll: VAD konuşmayı yakalamadan ÖNCEKİ son N ms ham ses chunk'ın
+        # başına eklenir — WebRTC'nin kaçırdığı kelime başlangıçları kırpılmaz.
+        pre_roll_ms=int(os.getenv("PRE_ROLL_MS", "240")),
+        # Overlap: MAX_CHUNK_DURATION nedeniyle konuşmanın ORTASINDAN kesilen
+        # chunk'larda son N ms bir sonraki chunk'a taşınır; sonraki chunk'ta bu
+        # önek transkripsiyondan kırpılır (çift sayım olmaz), ama Whisper kesim
+        # noktasındaki kelimeyi tam bağlamla görür.
+        chunk_overlap_ms=int(os.getenv("CHUNK_OVERLAP_MS", "480")),
+        # VAD varsayılanları CHiME-6 taramasının (output/vad_sweep*.csv)
+        # optimum bölgesine ayarlı: aggr=2 / silero=0.70. Not: Silero artık
+        # kesintisiz 512-örnek akışla beslendiği için eşik semantiği eski
+        # (padding'li) kuruluma göre daha keskin; yeniden tarama önerilir.
+        vad_aggressiveness=int(os.getenv("VAD_AGGRESSIVENESS", "2")),
+        silero_threshold=float(os.getenv("SILERO_THRESHOLD", "0.70")),
         hf_token=os.getenv("HF_TOKEN"),
         local_models_dir=local_models_dir,
-        whisper_path=local_models_dir / "whisper-small",
+        whisper_path=_resolve_whisper_path(local_models_dir, device),
         diarization_model=os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1"),
         diarization_config_path=local_models_dir / "diarization_config.yaml",
         device=device,
@@ -93,10 +129,14 @@ def load_settings() -> Settings:
         whisper_compression_ratio_threshold=float(os.getenv("WHISPER_COMPRESSION_RATIO_THRESHOLD", "2.4")),
         diarization_embedding_threshold=float(os.getenv("DIARIZATION_EMBEDDING_THRESHOLD", "0.66")),
         diarization_warmup_ms=int(os.getenv("DIARIZATION_WARMUP_MS", "20000")),
-        candidate_confirmations_needed=int(os.getenv("CANDIDATE_CONFIRMATIONS_NEEDED", "3")),
-        candidate_ttl=int(os.getenv("CANDIDATE_TTL", "5")),
+        # Aday kapısı gevşetildi (4 gözlem × ≥3sn → 2 gözlem × ≥2sn, TTL 15):
+        # eski kapı o kadar sıkıydı ki warm-up'ta konuşmamış GERÇEK konuşmacılar
+        # hiç oluşturulamıyor, sesleri en yakın mevcut konuşmacıya yapışıp
+        # DER confusion / cpWER hatasına dönüşüyordu (AMI: 4 konuşmacıdan 2'si).
+        candidate_confirmations_needed=int(os.getenv("CANDIDATE_CONFIRMATIONS_NEEDED", "2")),
+        candidate_ttl=int(os.getenv("CANDIDATE_TTL", "15")),
         candidate_self_similarity=float(os.getenv("CANDIDATE_SELF_SIMILARITY", "0.78")),
-        min_new_speaker_duration=float(os.getenv("MIN_NEW_SPEAKER_DURATION", "3.0")),
+        min_new_speaker_duration=float(os.getenv("MIN_NEW_SPEAKER_DURATION", "2.0")),
     )
 
 
@@ -154,6 +194,8 @@ SILENCE_LIMIT = settings.silence_limit
 SHORT_SILENCE_LIMIT = settings.short_silence_limit
 SOFT_CHUNK_DURATION_MS = settings.soft_chunk_duration_ms
 MAX_CHUNK_DURATION_MS = settings.max_chunk_duration_ms
+PRE_ROLL_MS = settings.pre_roll_ms
+CHUNK_OVERLAP_MS = settings.chunk_overlap_ms
 VAD_AGGRESSIVENESS = settings.vad_aggressiveness
 SILERO_THRESHOLD = settings.silero_threshold
 HF_TOKEN = settings.hf_token

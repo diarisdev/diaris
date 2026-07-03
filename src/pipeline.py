@@ -8,6 +8,7 @@ import queue
 import threading
 import time
 import wave
+from collections import deque
 from dataclasses import dataclass, field
 
 import keyboard
@@ -18,9 +19,11 @@ import pyaudiowpatch as pyaudio
 from .audio.device import auto_detect_device
 from .audio.vad import VADEngine
 from .config import (
+    CHUNK_OVERLAP_MS,
     FRAME_DURATION_MS,
     MAX_CHUNK_DURATION_MS,
     OUTPUT_FILENAME,
+    PRE_ROLL_MS,
     SAVE_AUDIO_FILE,
     SHORT_SILENCE_LIMIT,
     SILENCE_LIMIT,
@@ -37,6 +40,14 @@ logger = logging.getLogger(__name__)
 FORMAT = pyaudio.paInt16
 STOP_SENTINEL = None
 
+# Frame sayısına çevrilmiş pre-roll / overlap büyüklükleri.
+PRE_ROLL_FRAMES = max(0, PRE_ROLL_MS // FRAME_DURATION_MS)
+OVERLAP_FRAMES = max(0, CHUNK_OVERLAP_MS // FRAME_DURATION_MS)
+
+
+def _make_preroll() -> deque:
+    return deque(maxlen=PRE_ROLL_FRAMES)
+
 
 @dataclass
 class RecordingState:
@@ -44,15 +55,30 @@ class RecordingState:
     chunk_buffer: list[bytes] = field(default_factory=list)
     silence_counter: int = 0
     has_spoken: bool = False
+    # Pre-roll halkası: konuşma başlamadan önceki son N frame'in HAM sesi.
+    # Konuşma algılandığında chunk'ın başına eklenir (kelime başı kırpılmaz).
+    preroll: deque = field(default_factory=_make_preroll)
+    # Overlap taşıması: max-süre kesmesinde bir önceki chunk'tan taşınan ve
+    # ZATEN transkribe edilmiş önek (ms). Sonraki transkripsiyonda kırpılır.
+    trim_ms: int = 0
+    # Global frame sayacı + aktif chunk'ın global başlangıç frame'i.
+    # Offline replay/benchmark sürücüleri mutlak zaman damgası için kullanır.
+    total_frames: int = 0
+    chunk_start_frame: int = 0
 
     @property
     def chunk_duration_ms(self) -> int:
         return len(self.chunk_buffer) * FRAME_DURATION_MS
 
+    @property
+    def chunk_start_ms(self) -> int:
+        return self.chunk_start_frame * FRAME_DURATION_MS
+
     def reset_chunk(self) -> None:
         self.chunk_buffer = []
         self.silence_counter = 0
         self.has_spoken = False
+        self.trim_ms = 0
 
 
 def _emit_status(message: str, on_status_change=None) -> None:
@@ -171,7 +197,12 @@ def _worker_loop(audio_queue, diarization_queue, ai_worker, translation_engine, 
             
             captured_at = task.get("captured_at")  # perf: chunk kapanış zaman damgası
             _t_stt = time.perf_counter()
-            output = ai_worker.process_chunk(chunk_bytes, is_final=is_final, language=source_lang)
+            output = ai_worker.process_chunk(
+                chunk_bytes,
+                is_final=is_final,
+                language=source_lang,
+                trim_prefix_ms=task.get("trim_prefix_ms", 0),
+            )
             stt_ms = (time.perf_counter() - _t_stt) * 1000.0
             if not output:
                 continue
@@ -266,21 +297,37 @@ def _should_stop(stop_event) -> bool:
 
 
 def _update_recording_state(state: RecordingState, data: bytes, is_speech: bool) -> str:
+    """Bir frame'i kayıt durumuna işler.
+
+    HAM SES KORUNUR: VAD kararı yalnızca chunk SINIRLARINI belirler, sesi asla
+    yeniden yazmaz. (Eski davranış konuşma-dışı frame'leri sıfırla değiştiriyordu;
+    VAD'in ortada kaçırdığı her frame sert bir süreksizliğe dönüşüp Whisper'da
+    silme/halüsinasyon üretiyordu.)
+    """
+    frame_idx = state.total_frames
+    state.total_frames += 1
+    state.frames.append(data)
+
     if is_speech:
-        state.frames.append(data)
+        if not state.has_spoken:
+            # Yeni chunk: pre-roll'daki ham frame'leri başa ekle — VAD konuşmayı
+            # geç yakaladıysa kelimenin başı yine de chunk'ın içindedir.
+            carried = list(state.preroll)
+            state.preroll.clear()
+            state.chunk_buffer.extend(carried)
+            state.chunk_start_frame = frame_idx - len(carried)
+            state.has_spoken = True
         state.chunk_buffer.append(data)
         state.silence_counter = 0
-        state.has_spoken = True
         return "[ KONUŞULUYOR ]"
 
-    silence_bytes = b"\x00" * len(data)
-    state.frames.append(silence_bytes)
-
     if state.has_spoken:
-        state.chunk_buffer.append(silence_bytes)
+        # Hangover: konuşma sonrası bekleme frame'leri de HAM olarak eklenir.
+        state.chunk_buffer.append(data)
         state.silence_counter += 1
         return "[ BEKLENİYOR ] "
 
+    state.preroll.append(data)
     return "[ SESSİZLİK ]  "
 
 
@@ -290,15 +337,26 @@ def _active_silence_limit(chunk_duration_ms: int) -> int:
     return SILENCE_LIMIT
 
 
-def _flush_chunk_if_ready(state: RecordingState, audio_queue) -> bool:
+def _flush_chunk_if_ready(state: RecordingState, audio_queue) -> str | None:
+    """Chunk hazırsa kuyruğa koyar.
+
+    Returns:
+        None  → flush yok.
+        "silence" → konuşma sessizlikle bitti (VAD akış durumu sıfırlanabilir).
+        "max"     → konuşmanın ORTASINDAN max-süre kesmesi; son CHUNK_OVERLAP_MS
+                    bir sonraki chunk'a taşındı ve orada transkripsiyondan
+                    kırpılacak (trim_prefix_ms). Böylece kesim noktasındaki
+                    kelime tam bağlamla yeniden görülür ama çift sayılmaz.
+    """
     duration_ms = state.chunk_duration_ms
     silence_limit = _active_silence_limit(duration_ms)
-    should_flush = (
-        state.has_spoken
-        and (state.silence_counter > silence_limit or duration_ms >= MAX_CHUNK_DURATION_MS)
-    )
-    if not should_flush:
-        return False
+    if not state.has_spoken:
+        return None
+
+    silence_cut = state.silence_counter > silence_limit
+    max_cut = duration_ms >= MAX_CHUNK_DURATION_MS
+    if not (silence_cut or max_cut):
+        return None
 
     if state.chunk_buffer:
         audio_queue.put({
@@ -307,9 +365,24 @@ def _flush_chunk_if_ready(state: RecordingState, audio_queue) -> bool:
             # Performans ölçümü: chunk'ın KAPANDIĞI (son frame yakalandığı) an.
             # Gecikme metriklerinin referans noktası.
             "captured_at": time.time(),
+            # Mutlak zaman: chunk verisinin ilk frame'inin global konumu (ms).
+            "start_ms": state.chunk_start_ms,
+            # Önceki chunk'tan taşınan, zaten transkribe edilmiş önek (ms).
+            "trim_prefix_ms": state.trim_ms,
         })
+
+    if max_cut and not silence_cut and OVERLAP_FRAMES > 0:
+        # Konuşma sürüyor: kuyruğu taşı, durumu 'konuşuyor' bırak.
+        carry = state.chunk_buffer[-OVERLAP_FRAMES:]
+        state.chunk_buffer = list(carry)
+        state.silence_counter = 0
+        state.has_spoken = True
+        state.trim_ms = len(carry) * FRAME_DURATION_MS
+        state.chunk_start_frame = state.total_frames - len(carry)
+        return "max"
+
     state.reset_chunk()
-    return True
+    return "silence"
 
 
 def _save_recording(frames, channels, rate, sample_width, on_status_change=None) -> None:
@@ -441,11 +514,16 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
             if state.has_spoken and len(state.chunk_buffer) > 0 and len(state.chunk_buffer) % 10 == 0:
                 audio_queue.put({
                     "type": "partial",
-                    "data": b"".join(state.chunk_buffer)
+                    "data": b"".join(state.chunk_buffer),
+                    "trim_prefix_ms": state.trim_ms,
                 })
 
-            if _flush_chunk_if_ready(state, audio_queue):
+            flush_reason = _flush_chunk_if_ready(state, audio_queue)
+            if flush_reason:
                 status = "[ YAPAY ZEKAYA İLETİLDİ ]"
+                if flush_reason == "silence":
+                    # Konuşma arası: Silero RNN durumu sonsuza dek taşınmasın.
+                    vad_engine.reset_stream()
 
             print(f"Durum: {status} | AI: {confidence:.2f}       ", end="\r")
             if on_status_change:

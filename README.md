@@ -70,14 +70,20 @@ python main.py --cli    # Terminal modu (Ctrl+Q ile durdur)
 |----------|-----------|----------|
 | `HF_TOKEN` | — | Hugging Face token (**zorunlu**) |
 | `WHISPER_LANGUAGE` | `en` | Transkripsiyon dili |
-| `VAD_AGGRESSIVENESS` | `1` | WebRTC agresiflik (0–3) |
-| `SILERO_THRESHOLD` | `0.25` | Silero güven eşiği |
+| `WHISPER_MODEL` | — | Whisper model dizini (boş: GPU'da `whisper-medium`, yoksa `whisper-small`) |
+| `VAD_AGGRESSIVENESS` | `2` | WebRTC agresiflik (0–3) |
+| `SILERO_THRESHOLD` | `0.70` | Silero güven eşiği |
 | `SILENCE_LIMIT` | `30` | Sessizlik limiti (frame) |
 | `SHORT_SILENCE_LIMIT` | `15` | Uzun chunk'larda kısa sessizlik limiti |
 | `SOFT_CHUNK_DURATION_MS` | `5000` | Bu süre sonrası SHORT_SILENCE_LIMIT devreye girer |
 | `MAX_CHUNK_DURATION_MS` | `10000` | Maks chunk süresi |
-| `DIARIZATION_EMBEDDING_THRESHOLD` | `0.75` | Konuşmacı eşleme cosine similarity eşiği |
-| `DIARIZATION_WARMUP_MS` | `45000` | Warm-up süresi (embedding toplama) |
+| `PRE_ROLL_MS` | `240` | Konuşma öncesi chunk'a eklenen ham ses (onset koruması) |
+| `CHUNK_OVERLAP_MS` | `480` | Max-süre kesmesinde sonraki chunk'a taşınan overlap |
+| `DIARIZATION_EMBEDDING_THRESHOLD` | `0.66` | Konuşmacı eşleme cosine similarity eşiği |
+| `DIARIZATION_WARMUP_MS` | `20000` | Warm-up süresi (embedding toplama) |
+| `CANDIDATE_CONFIRMATIONS_NEEDED` | `2` | Yeni konuşmacı için gereken gözlem sayısı |
+| `CANDIDATE_TTL` | `15` | Aday konuşmacı bekleme süresi (chunk) |
+| `MIN_NEW_SPEAKER_DURATION` | `2.0` | Yeni konuşmacı için min temiz konuşma (sn) |
 | `SAVE_AUDIO_FILE` | `false` | Tüm sesi WAV olarak kaydet |
 | `OUTPUT_FILENAME` | `system_recorded.wav` | Kayıt dosya adı |
 

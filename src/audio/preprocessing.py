@@ -20,20 +20,45 @@ def load_silero_vad():
     return model, utils
 
 
-def to_mono_float32(audio_np_int16):
-    """Stereo int16 → mono float32, RMS normalized."""
+# Normalizasyon sabitleri
+TARGET_SPEECH_RMS = 0.1   # hedef konuşma seviyesi
+MAX_NORMALIZATION_GAIN = 10.0  # sessiz/gürültü chunk'ları 100x'e kadar yükseltmeyi önler
+
+
+def _estimate_speech_rms(mono: np.ndarray, rate: int | None) -> float:
+    """Konuşma seviyesini ~20 ms'lik blok RMS'lerinin 95. yüzdeliğiyle kestirir.
+
+    Chunk'lar artık ham sessizlik/hangover da içerdiğinden global RMS konuşma
+    seviyesini olduğundan düşük gösterir ve kazancı şişirir; yüksek yüzdelik
+    blok RMS'i, VAD gerektirmeden "konuşmalı bölgelerin" seviyesine yakınsar.
+    """
+    block = max(1, int((rate or 48000) * 0.02))
+    n_blocks = mono.shape[0] // block
+    if n_blocks >= 3:
+        blocks = mono[: n_blocks * block].reshape(n_blocks, block)
+        block_rms = np.sqrt(np.mean(blocks ** 2, axis=1))
+        return float(np.percentile(block_rms, 95))
+    return float(np.sqrt(np.mean(mono ** 2))) if mono.size else 0.0
+
+
+def to_mono_float32(audio_np_int16, rate: int | None = None):
+    """Çok kanallı int16 → mono float32, konuşma seviyesine göre normalize.
+
+    * Kanal ORTALAMASI alınır (tek kanal seçmek stereo-pan'lı system-audio'da
+      bir konuşmacıyı neredeyse tamamen kaybettirebiliyordu).
+    * Kazanç konuşma-seviyesi kestirimi üzerinden hesaplanır ve
+      MAX_NORMALIZATION_GAIN ile sınırlanır — salt gürültü içeren chunk'ların
+      100x yükseltilip Whisper/pyannote'a "konuşma gibi" sunulmasını önler.
+    """
     if audio_np_int16.ndim > 1 and audio_np_int16.shape[1] > 1:
-        mono = audio_np_int16[:, 0].astype(np.float32) / 32768.0
+        mono = audio_np_int16.astype(np.float32).mean(axis=1) / 32768.0
     else:
         mono = audio_np_int16.flatten().astype(np.float32) / 32768.0
 
-    # RMS normalizasyon (peak yerine — daha kararlı)
-    rms = np.sqrt(np.mean(mono ** 2))
-    if rms > 0.001:
-        target_rms = 0.1
-        mono = mono * (target_rms / rms)
-        # Clipping önle
-        mono = np.clip(mono, -1.0, 1.0)
+    speech_rms = _estimate_speech_rms(mono, rate)
+    if speech_rms > 0.001:
+        gain = min(TARGET_SPEECH_RMS / speech_rms, MAX_NORMALIZATION_GAIN)
+        mono = np.clip(mono * gain, -1.0, 1.0)
     return mono
 
 

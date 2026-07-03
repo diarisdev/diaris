@@ -1,15 +1,17 @@
 """Konuşmacı embedding çıkarma.
 
 Pyannote diarization turn'lerinden konuşmacı-başına ses toplar, kalite kapılarından
-(min süre/enerji), speech-only ve bandpass adımlarından geçirip embedding üretir.
-ai_worker.py'den ayrıldı (saf taşıma; davranış birebir). ai_worker bunu ve
-sabitlerini geri export eder.
+(min süre/enerji) ve speech-only adımından geçirip embedding üretir.
+
+Not: Eski 200-3500 Hz bandpass adımı KALDIRILDI — pyannote/ECAPA tarzı embedding
+modelleri tam bant 16 kHz konuşmayla eğitilir; 3.5 kHz lowpass modelin kullandığı
+spektral detayı atıp embedding kalitesini DÜŞÜRÜYORDU.
 """
 
 import numpy as np
 import torch
 
-from ..audio.preprocessing import apply_bandpass_filter, extract_speech_only
+from ..audio.preprocessing import extract_speech_only
 
 # Minimum embedding requirements
 MIN_SPEECH_DURATION_FOR_EMBEDDING = 1.5  # saniye — embedding için min konuşma süresi
@@ -18,16 +20,43 @@ MIN_AUDIO_RMS_FOR_EMBEDDING = 0.01       # min RMS enerji — sessizliği filtre
 # ses embedding kalitesini kayda değer artırmaz ama Silero VAD'in Python döngüsü
 # ve embedding inference maliyetini (özellikle uzun chunk'larda) şişirir.
 MAX_EMBED_AUDIO_SEC = 6.0
+# En-enerjili bölüm seçimi için blok boyu (sn). 6 sn'lik bütçe, sesin İLK 6
+# saniyesi yerine en yüksek RMS'li 0.5 sn'lik bloklardan (zaman sıralı) kurulur.
+_ENERGY_BLOCK_SEC = 0.5
+
+
+def _select_highest_energy_audio(audio_1d: torch.Tensor, max_samples: int,
+                                 sample_rate: int = 16000) -> torch.Tensor:
+    """Sesin en yüksek enerjili bloklarını (zaman sırası korunarak) seçer.
+
+    Eski davranış ilk `max_samples` örneği alıyordu; konuşmacının en net
+    konuştuğu bölge chunk'ın sonundaysa embedding zayıf sesten çıkarılıyordu.
+    """
+    if audio_1d.shape[0] <= max_samples:
+        return audio_1d
+
+    block = max(1, int(_ENERGY_BLOCK_SEC * sample_rate))
+    n_blocks = audio_1d.shape[0] // block
+    if n_blocks <= 1:
+        return audio_1d[:max_samples]
+
+    blocks = audio_1d[: n_blocks * block].reshape(n_blocks, block)
+    block_rms = torch.sqrt(torch.mean(blocks ** 2, dim=1))
+
+    budget = max(1, max_samples // block)
+    top = torch.topk(block_rms, k=min(budget, n_blocks)).indices
+    top_sorted = torch.sort(top).values  # zaman sırası korunur
+    return blocks[top_sorted].reshape(-1)
 
 
 def extract_speaker_embeddings(embedding_model, silero_vad, get_speech_timestamps, waveform_16k, turns):
     """
     Her konuşmacı için ses bölümlerini ayırıp embedding çıkarır.
 
-    İyileştirmeler:
+    Kalite kapıları:
     - Min süre kontrolü (< 1.5s konuşma → atla)
     - Min enerji kontrolü (sessizlik → atla)
-    - Bandpass filter (200-3500 Hz)
+    - En-enerjili 6 sn seçimi (ilk 6 sn yerine)
     - Speech-only extraction (Silero VAD)
 
     Args:
@@ -76,10 +105,10 @@ def extract_speaker_embeddings(embedding_model, silero_vad, get_speech_timestamp
             continue
 
         # Perf cap: pahalı adımlardan (Silero VAD döngüsü + embedding) önce
-        # konuşmacı başına sesi MAX_EMBED_AUDIO_SEC ile sınırla.
+        # konuşmacı başına sesi MAX_EMBED_AUDIO_SEC ile sınırla — İLK 6 sn
+        # yerine EN ENERJİLİ 6 sn (zaman sıralı bloklar).
         max_samples = int(MAX_EMBED_AUDIO_SEC * 16000)
-        if spk_audio_raw.shape[0] > max_samples:
-            spk_audio_raw = spk_audio_raw[:max_samples]
+        spk_audio_raw = _select_highest_energy_audio(spk_audio_raw, max_samples)
 
         # 3. Speech-only extraction (sessizliği temizle)
         spk_audio_clean = extract_speech_only(spk_audio_raw, silero_vad, get_speech_timestamps)
@@ -90,8 +119,8 @@ def extract_speaker_embeddings(embedding_model, silero_vad, get_speech_timestamp
 
         clean_duration_sec = spk_audio_clean.shape[0] / 16000
 
-        # 4. Bandpass filter (konuşma frekansları)
-        spk_waveform = apply_bandpass_filter(spk_audio_clean.unsqueeze(0))
+        # Tam bant ses embedding modeline verilir (bandpass YOK — bkz. modül docstring).
+        spk_waveform = spk_audio_clean.unsqueeze(0)
 
         try:
             emb_output = embedding_model({
@@ -107,7 +136,7 @@ def extract_speaker_embeddings(embedding_model, silero_vad, get_speech_timestamp
 
             emb_tensor = emb_tensor.squeeze().cpu()
 
-            # 5. L2 Normalization (Prevents scale issues in clustering/similarity)
+            # L2 Normalization (Prevents scale issues in clustering/similarity)
             emb_norm = torch.norm(emb_tensor)
             if emb_norm > 0:
                 emb_tensor = emb_tensor / emb_norm

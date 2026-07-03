@@ -232,11 +232,11 @@ def process_meeting(worker: AIWorker, vad: VADEngine, audio_path: str,
     state = RecordingState()
     shim = _ListQueue()
     global_results: list = []
-    pending_offset = 0.0
     speech_frames = 0                        # VAD'in konuşma saydığı frame sayısı
 
-    def _emit_chunk(chunk_bytes: bytes, offset: float):
-        out = worker.process_chunk(chunk_bytes, is_final=True, language=language)
+    def _emit_chunk(chunk_bytes: bytes, offset: float, trim_prefix_ms: int = 0):
+        out = worker.process_chunk(chunk_bytes, is_final=True, language=language,
+                                   trim_prefix_ms=trim_prefix_ms)
         if not out:
             return
         segs = out.get("results", [])
@@ -271,19 +271,23 @@ def process_meeting(worker: AIWorker, vad: VADEngine, audio_path: str,
         if is_speech:
             speech_frames += 1
 
-        # Yeni chunk'ın ilk konuşma frame'i → global başlangıcı kaydet
-        if not state.has_spoken and is_speech:
-            pending_offset = idx * FRAME_DURATION_MS / 1000.0
-
         _update_recording_state(state, data, is_speech)
 
-        if _flush_chunk_if_ready(state, shim):
+        # Chunk'ın mutlak başlangıcı artık task'in içinde gelir (start_ms):
+        # pre-roll ve overlap taşıması RecordingState tarafından hesaba katılır.
+        flush_reason = _flush_chunk_if_ready(state, shim)
+        if flush_reason:
             chunk = shim.pop_last()
-            _emit_chunk(chunk["data"], pending_offset)
+            _emit_chunk(chunk["data"], chunk["start_ms"] / 1000.0,
+                        chunk.get("trim_prefix_ms", 0))
+            if flush_reason == "silence":
+                # Canlı pipeline ile aynı: konuşma arası Silero RNN sıfırlanır.
+                vad.reset_stream()
 
     # Dosya sonu: flush olmadan kalan son chunk'ı zorla işle
     if state.has_spoken and state.chunk_buffer:
-        _emit_chunk(b"".join(state.chunk_buffer), pending_offset)
+        _emit_chunk(b"".join(state.chunk_buffer), state.chunk_start_ms / 1000.0,
+                    state.trim_ms)
 
     compute_time = time.perf_counter() - t0
     vad_speech_sec = speech_frames * FRAME_DURATION_MS / 1000.0
