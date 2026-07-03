@@ -1,3 +1,3 @@
-from .engine import TranslationEngine, get_translation_engine
+from .engine import TranslationEngine, CachingTranslationEngine, get_translation_engine
 
-__all__ = ["TranslationEngine", "get_translation_engine"]
+__all__ = ["TranslationEngine", "CachingTranslationEngine", "get_translation_engine"]

@@ -187,7 +187,9 @@ class VADEngine:
         while self._fifo.size >= _SILERO_WINDOW:
             window = self._fifo[:_SILERO_WINDOW]
             self._fifo = self._fifo[_SILERO_WINDOW:]
-            with torch.no_grad():
+            # inference_mode: no_grad'dan daha ucuz (version-counter/autograd
+            # kaydı tamamen kapalı) — frame başına çağrılan sıcak yol.
+            with torch.inference_mode():
                 p = self.silero_model(
                     torch.from_numpy(np.ascontiguousarray(window)), _SILERO_RATE
                 ).item()

@@ -184,11 +184,16 @@ class SubtitleOverlay(QtWidgets.QWidget):
 
         line_re = re.compile(r"^\[(.*)\] \d+\.\d+s\s+-\s+\d+\.\d+s:\s+(.*)$")
 
-        parsed_lines = []
-        for text in finalized_segments:
+        # Yalnızca son MAX_VISIBLE_LINES satır gösterileceği için SONDAN başa
+        # ayrıştır ve yeterince satır toplanınca dur — tüm oturum geçmişini her
+        # güncellemede regex'ten geçirmek gereksiz (büyüyen maliyetti).
+        parsed_tail = []  # sondan başa toplanır, sonra ters çevrilir
+        for text in reversed(finalized_segments):
+            if len(parsed_tail) >= self.MAX_VISIBLE_LINES:
+                break
             if not text:
                 continue
-            for line in text.split("\n"):
+            for line in reversed(text.split("\n")):
                 line = line.strip()
                 if not line:
                     continue
@@ -202,13 +207,16 @@ class SubtitleOverlay(QtWidgets.QWidget):
                     if spk.startswith("[") and spk.endswith("]"):
                         spk = spk[1:-1].strip()
                     speaker_tag = spk
-                parsed_lines.append((speaker_tag, content))
+                parsed_tail.append((speaker_tag, content))
+                if len(parsed_tail) >= self.MAX_VISIBLE_LINES:
+                    break
+        parsed_lines = list(reversed(parsed_tail))
 
-        # Yalnızca en son N konuşmacı satırını göster. Ardışık satır aynı
-        # konuşmacıya aitse etiketi (örn. "Konuşmacı 1") tekrarlamayız; satır
-        # konuşmacı sütunu kadar girintilenir, böylece metin hizalı kalır.
+        # Ardışık satır aynı konuşmacıya aitse etiketi (örn. "Konuşmacı 1")
+        # tekrarlamayız; satır konuşmacı sütunu kadar girintilenir, böylece
+        # metin hizalı kalır.
         prev_tag = None
-        for speaker_tag, content in parsed_lines[-self.MAX_VISIBLE_LINES:]:
+        for speaker_tag, content in parsed_lines:
             is_continuation = bool(speaker_tag) and speaker_tag == prev_tag
             prev_tag = speaker_tag
             self.segments.append({
@@ -222,6 +230,15 @@ class SubtitleOverlay(QtWidgets.QWidget):
         self.render_subtitles()
 
     def render_subtitles(self):
+        # Yeniden kurulum boyunca repaint'i askıya al: satır başına ayrı ayrı
+        # boyama yerine sonda TEK repaint (görsel çıktı birebir aynı).
+        self.sub_area.setUpdatesEnabled(False)
+        try:
+            self._rebuild_subtitle_rows()
+        finally:
+            self.sub_area.setUpdatesEnabled(True)
+
+    def _rebuild_subtitle_rows(self):
         # Temizle
         while self.sub_layout.count() > 0:
             item = self.sub_layout.takeAt(0)

@@ -35,6 +35,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.overlay_visible = True
         self.is_dark_theme = True
         self.finalized_segments = []
+        # Diarization güncellemesi almış segment index'leri: geç gelen
+        # 'provisional' (asenkron çeviri) güncellemeleri bunların üstüne yazamaz.
+        self.diarized_indices = set()
         self.pipeline_thread = None
         self.stop_event = threading.Event()
         self.loopback_devices = []
@@ -941,61 +944,68 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
 
+    # Log alanında gösterilecek maksimum segment sayısı. Sınırsız yeniden
+    # kurulum, oturum uzadıkça her partial'da büyüyen bir maliyet demekti
+    # (geç-oturum takılmalarının kaynağı). Eski segmentler listede durur,
+    # yalnızca görüntü son N segmentle sınırlıdır.
+    MAX_LOG_SEGMENTS = 200
+
+    def _refresh_views(self, partial=""):
+        """Log + overlay'i tek geçişte, sınırlı maliyetle günceller.
+
+        Eski yol her olayda clear() + segment başına append() yapıyordu; her
+        append ayrı bir document-edit/relayout tetikler. Tek setPlainText çağrısı
+        bir kez layout yapar ve gösterim son MAX_LOG_SEGMENTS ile sınırlıdır.
+        """
+        analyzing = self.TRANSLATIONS[self.ui_lang]["analyzing"]
+
+        lines = []
+        for seg in self.finalized_segments[-self.MAX_LOG_SEGMENTS:]:
+            if seg:
+                lines.append(seg.replace("Çözümleniyor...", analyzing) + "\n")
+        if partial:
+            lines.append(f"{self.TRANSLATIONS[self.ui_lang]['live_prefix']}{partial}")
+
+        self.log_text.setPlainText("\n".join(lines))
+        self.log_text.moveCursor(QtGui.QTextCursor.MoveOperation.End)
+        self.log_text.ensureCursorVisible()
+
+        # Altyazı overlay'i zaten yalnızca son satırları gösteriyor; ona da
+        # sınırlı liste yeterli (update_subtitles sondan doğru ayrıştırır).
+        finalized_translated = [
+            seg.replace("Çözümleniyor...", analyzing) if seg else ""
+            for seg in self.finalized_segments[-self.MAX_LOG_SEGMENTS:]
+        ]
+        self.overlay.update_subtitles(finalized_translated, partial)
+
     def safe_on_transcription(self, event):
         if not isinstance(event, dict):
             event = {"type": "final", "text": str(event)}
-            
+
         # UI Güncellemesi
         if event["type"] == "final":
             idx = event.get("segment_index", len(self.finalized_segments))
+            # Geç gelen asenkron çeviri (provisional), diarization'ın konuşmacı
+            # bazlı nihai metnini geri ezmesin.
+            if event.get("provisional") and idx in self.diarized_indices:
+                return
             while len(self.finalized_segments) <= idx:
                 self.finalized_segments.append("")
             self.finalized_segments[idx] = event["text"]
             partial = ""
         else:
             partial = event["text"]
-            
-        # Log alanını güncelle
-        self.log_text.clear()
-        for seg in self.finalized_segments:
-            if seg:
-                seg_translated = seg.replace("Çözümleniyor...", self.TRANSLATIONS[self.ui_lang]["analyzing"])
-                self.log_text.append(seg_translated + "\n")
-        if partial:
-            self.log_text.append(f"{self.TRANSLATIONS[self.ui_lang]['live_prefix']}{partial}")
-            
-        # Kaydır
-        self.log_text.ensureCursorVisible()
-        
-        # Altyazıyı güncelle
-        finalized_translated = [
-            seg.replace("Çözümleniyor...", self.TRANSLATIONS[self.ui_lang]["analyzing"]) if seg else ""
-            for seg in self.finalized_segments
-        ]
-        self.overlay.update_subtitles(finalized_translated, partial)
+
+        self._refresh_views(partial)
 
     def safe_on_speaker_update(self, event):
         segment_index = event["segment_index"]
         text = event["text"]
-        
+
         if 0 <= segment_index < len(self.finalized_segments):
             self.finalized_segments[segment_index] = text
-            
-            # Log alanını güncelle
-            self.log_text.clear()
-            for seg in self.finalized_segments:
-                if seg:
-                    seg_translated = seg.replace("Çözümleniyor...", self.TRANSLATIONS[self.ui_lang]["analyzing"])
-                    self.log_text.append(seg_translated + "\n")
-            
-            self.log_text.ensureCursorVisible()
-            
-            # Altyazıyı güncelle
-            finalized_translated = [
-                seg.replace("Çözümleniyor...", self.TRANSLATIONS[self.ui_lang]["analyzing"]) if seg else ""
-                for seg in self.finalized_segments
-            ]
-            self.overlay.update_subtitles(finalized_translated, "")
+            self.diarized_indices.add(segment_index)
+            self._refresh_views("")
 
     # ------------------------------------------------------------------ #
     #  Kayıt Kontrolleri                                                  #
@@ -1013,6 +1023,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_btn.setEnabled(False)
         
         self.finalized_segments = []
+        self.diarized_indices = set()
         self.log_text.clear()
         self.overlay.update_subtitles([], "")
         

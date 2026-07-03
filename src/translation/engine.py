@@ -3,6 +3,8 @@ import urllib.parse
 import json
 import os
 import logging
+import threading
+from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +320,90 @@ class CTranslate2TranslationEngine(TranslationEngine):
         except Exception as e:
             logger.error(f"CTranslate2 batch translation failed: {e}, falling back")
             return [self.translate(t, source_lang, target_lang) for t in texts]
+
+class CachingTranslationEngine(TranslationEngine):
+    """Herhangi bir motoru saran thread-güvenli LRU çeviri cache'i.
+
+    Canlı pipeline aynı metni birden çok kez çevirebiliyor (anlık final +
+    diarization sonrası konuşmacı-bazlı geçiş). Online motorlarda (Google/DeepL)
+    her tekrar bir ağ turuydu. Cache birebir aynı (metin, kaynak, hedef)
+    üçlüsünü yeniden çevirmez — çıktı aynıdır, yalnızca maliyet düşer.
+    """
+
+    _ERROR_PREFIX = "[Ceviri Hata"  # hata metinleri cache'lenmez (geçici olabilir)
+
+    def __init__(self, inner: TranslationEngine, maxsize: int = 256):
+        self.inner = inner
+        self.maxsize = maxsize
+        self._cache: OrderedDict = OrderedDict()
+        self._lock = threading.Lock()
+
+    def __getattr__(self, name):
+        # Sarılan motorun alanlarına şeffaf erişim (örn. .translator kontrolü).
+        return getattr(self.inner, name)
+
+    @staticmethod
+    def _key(text: str, source_lang: str, target_lang: str):
+        return (text, source_lang.split("-")[0].lower(), target_lang.split("-")[0].lower())
+
+    def _get(self, key):
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+        return None
+
+    def _put(self, key, value: str):
+        if not value or value.startswith(self._ERROR_PREFIX):
+            return
+        with self._lock:
+            self._cache[key] = value
+            self._cache.move_to_end(key)
+            while len(self._cache) > self.maxsize:
+                self._cache.popitem(last=False)
+
+    def translate(self, text: str, source_lang: str = "en", target_lang: str = "tr") -> str:
+        if not text.strip():
+            return ""
+        if is_same_language(source_lang, target_lang):
+            return text
+        key = self._key(text, source_lang, target_lang)
+        hit = self._get(key)
+        if hit is not None:
+            return hit
+        translated = self.inner.translate(text, source_lang, target_lang)
+        self._put(key, translated)
+        return translated
+
+    def translate_many(self, texts, source_lang: str = "en", target_lang: str = "tr"):
+        texts = list(texts)
+        if not texts:
+            return []
+        if is_same_language(source_lang, target_lang):
+            return [t or "" for t in texts]
+
+        out = [None] * len(texts)
+        miss_idx = []
+        for i, t in enumerate(texts):
+            if not t or not t.strip():
+                out[i] = ""
+                continue
+            hit = self._get(self._key(t, source_lang, target_lang))
+            if hit is not None:
+                out[i] = hit
+            else:
+                miss_idx.append(i)
+
+        if miss_idx:
+            translated = self.inner.translate_many(
+                [texts[i] for i in miss_idx], source_lang, target_lang
+            )
+            for k, i in enumerate(miss_idx):
+                out[i] = translated[k]
+                self._put(self._key(texts[i], source_lang, target_lang), translated[k])
+
+        return out
+
 
 def get_translation_engine(engine_name: str = "google", **kwargs) -> TranslationEngine:
     name = engine_name.lower()

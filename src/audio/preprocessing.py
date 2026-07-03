@@ -62,15 +62,24 @@ def to_mono_float32(audio_np_int16, rate: int | None = None):
     return mono
 
 
+# Kaynak hız başına önceden hesaplanmış resample kernel'i.
+# torchaudio.functional.resample her çağrıda sinc kernel'ini YENİDEN kurar;
+# canlı yolda bu, her partial'da (300-600 ms'de bir) ve her final chunk'ta
+# gereksiz maliyetti. transforms.Resample aynı matematiği kernel'i bir kez
+# kurup uygular — çıktı örnekleri birebir aynıdır.
+_RESAMPLERS: dict = {}
+
+
 def resample_to_16k(mono_float32, src_rate):
-    """Pyannote'un beklediği 16kHz sample rate'e resample eder."""
+    """Pyannote'un beklediği 16kHz sample rate'e resample eder (kernel cache'li)."""
     waveform = torch.from_numpy(mono_float32).unsqueeze(0)
     if src_rate == 16000:
         return waveform, 16000
-    resampled = torchaudio.functional.resample(
-        waveform, orig_freq=src_rate, new_freq=16000
-    )
-    return resampled, 16000
+    resampler = _RESAMPLERS.get(src_rate)
+    if resampler is None:
+        resampler = torchaudio.transforms.Resample(orig_freq=src_rate, new_freq=16000)
+        _RESAMPLERS[src_rate] = resampler
+    return resampler(waveform), 16000
 
 
 def apply_bandpass_filter(waveform_16k):

@@ -9,6 +9,7 @@ import threading
 import time
 import wave
 from collections import deque
+from concurrent import futures
 from dataclasses import dataclass, field
 
 import keyboard
@@ -23,6 +24,7 @@ from .config import (
     FRAME_DURATION_MS,
     MAX_CHUNK_DURATION_MS,
     OUTPUT_FILENAME,
+    PARTIAL_WINDOW_MS,
     PRE_ROLL_MS,
     SAVE_AUDIO_FILE,
     SHORT_SILENCE_LIMIT,
@@ -34,15 +36,21 @@ from .config import (
 )
 from .core.ai_worker import AIWorker
 from .core.formatting import format_results
-from .translation import get_translation_engine
+from .translation import CachingTranslationEngine, get_translation_engine
 
 logger = logging.getLogger(__name__)
 FORMAT = pyaudio.paInt16
 STOP_SENTINEL = None
 
-# Frame sayısına çevrilmiş pre-roll / overlap büyüklükleri.
+# Frame sayısına çevrilmiş pre-roll / overlap / partial-pencere büyüklükleri.
 PRE_ROLL_FRAMES = max(0, PRE_ROLL_MS // FRAME_DURATION_MS)
 OVERLAP_FRAMES = max(0, CHUNK_OVERLAP_MS // FRAME_DURATION_MS)
+PARTIAL_WINDOW_FRAMES = max(1, PARTIAL_WINDOW_MS // FRAME_DURATION_MS)
+
+# UI durum güncellemeleri en fazla bu aralıkta bir gönderilir (durum METNİ
+# değişirse anında). Her 30 ms frame'de sinyal + stil yenilemek Qt tarafında
+# saniyede 33 gereksiz relayout üretiyordu.
+STATUS_EMIT_INTERVAL_S = 0.2
 
 
 def _make_preroll() -> deque:
@@ -87,6 +95,57 @@ def _emit_status(message: str, on_status_change=None) -> None:
         on_status_change(message)
 
 
+def _submit_final_translation(executor, engine, on_transcription, results,
+                              segment_index, source_lang, target_lang) -> None:
+    """Final metnin çevirisini ARKA PLANDA yapar; kritik yolu bloklamaz.
+
+    Orijinal final anında basılmıştır; bu iş bitince aynı segment_index'e
+    'provisional' işaretli bir güncelleme gönderilir. Diarization güncellemesi
+    (konuşmacı bazlı çeviri) her zaman nihai otoritedir — UI, diarize edilmiş
+    bir segmente geç gelen provisional çeviriyi uygulamaz. Perf alanları
+    (captured_at vb.) bilerek YOKTUR: benchmark toplayıcısı aynı segmenti iki
+    kez saymasın.
+    """
+    def job():
+        try:
+            for r in results:
+                if r.get("text"):
+                    r["text"] = engine.translate(r["text"], source_lang, target_lang)
+            formatted = format_results(results, return_str=True)
+            if formatted:
+                on_transcription({
+                    "type": "final",
+                    "segment_index": segment_index,
+                    "text": formatted,
+                    "provisional": True,
+                })
+        except Exception:
+            logger.exception("Async final translation failed")
+
+    executor.submit(job)
+
+
+def _submit_partial_translation(executor, engine, on_transcription, text,
+                                gen_holder, gen, source_lang, target_lang) -> None:
+    """Partial metni arka planda çevirir; 'en yenisi kazanır'.
+
+    Partial'lar saniyede birkaç kez yenilenir; kuyrukta bekleyen bayat bir
+    çeviri hem işten önce hem de emit'ten önce nesil kontrolüyle düşürülür.
+    """
+    def job():
+        try:
+            if gen != gen_holder["value"]:
+                return  # daha yeni bir partial var — bayat işi hiç yapma
+            translated = engine.translate(text, source_lang, target_lang)
+            if gen != gen_holder["value"]:
+                return  # çeviri sürerken yenisi geldi — bayat sonucu basma
+            on_transcription({"type": "partial", "text": translated})
+        except Exception:
+            logger.exception("Async partial translation failed")
+
+    executor.submit(job)
+
+
 def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None, translation_engine=None):
     """Process queued diarization tasks in the background."""
     while True:
@@ -105,6 +164,13 @@ def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None, tran
             is_translation_needed = task.get("is_translation_needed", False)
             captured_at = task.get("captured_at")   # perf: chunk kapanış damgası
             stt_ms = task.get("stt_ms")
+
+            # Kuyruk bekleme telemetrisi: diarization gerçek-zamandan yavaş
+            # kalırsa konuşmacı etiketleri sessizce gecikmeye başlar — görünür kıl.
+            enqueued_at = task.get("enqueued_at")
+            diar_queue_ms = (time.time() - enqueued_at) * 1000.0 if enqueued_at else None
+            if diar_queue_ms is not None and diar_queue_ms > 5000:
+                logger.warning("Diarization queue lagging: %.0f ms wait", diar_queue_ms)
 
             # Run Pyannote diarization in background.
             # Sonuç: konuşmacıya göre bölünmüş, ÇEVRİLMEMİŞ segmentler.
@@ -136,6 +202,7 @@ def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None, tran
                         "captured_at": captured_at,
                         "stt_ms": stt_ms,
                         "diar_ms": diar_ms,
+                        "diar_queue_ms": diar_queue_ms,
                         "chunk_duration_ms": chunk_duration_ms,
                         "emitted_at": time.time(),
                     })
@@ -147,12 +214,16 @@ def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None, tran
             diarization_queue.task_done()
 
 
-def _worker_loop(audio_queue, diarization_queue, ai_worker, translation_engine, get_lang_pair, on_transcription=None):
+def _worker_loop(audio_queue, diarization_queue, ai_worker, translation_engine,
+                 get_lang_pair, on_transcription=None, translation_executor=None):
     """Process queued audio chunks until a sentinel is received."""
     if not ai_worker.load_models():
         return
 
     segment_index = 0
+    # Partial çevirileri için "en yenisi kazanır" nesil sayacı (closure'larla
+    # paylaşılan mutable holder).
+    partial_gen = {"value": 0}
 
     while True:
         task = audio_queue.get()
@@ -227,17 +298,15 @@ def _worker_loop(audio_queue, diarization_queue, ai_worker, translation_engine, 
                     "text": combined_text
                 }]
 
-            # Translate synchronously in ASR background thread (extremely fast, ~30ms)
-            # NOT: Bu yalnızca ANLIK gösterim içindir. Diarization aşaması çeviriyi
-            # konuşmacıya göre bölünmüş segmentler üzerinde yeniden yapar.
-            if is_translation_needed and translation_engine and results:
-                for r in results:
-                    if r.get("text"):
-                        r["text"] = translation_engine.translate(r["text"], source_lang, target_lang)
+            # Çeviri KRİTİK YOLDAN ÇIKARILDI. Eski davranış burada senkron
+            # translate() çağırıyordu; online motorlarda (Google/DeepL) bu, her
+            # final'de bir ağ turu demekti — final altyazıyı VE kuyruktaki bir
+            # sonraki chunk'ı bloklıyordu. Artık orijinal metin ANINDA basılır,
+            # çeviri translation_executor'da yapılıp güncelleme olarak gelir.
 
             if is_final:
                 formatted_str = format_results(results, return_str=True)
-                # Send the final transcript immediately
+                # Send the final transcript immediately (orijinal dil)
                 if formatted_str:
                     if on_transcription:
                         on_transcription({
@@ -251,6 +320,17 @@ def _worker_loop(audio_queue, diarization_queue, ai_worker, translation_engine, 
                         })
                     else:
                         print("\n" + formatted_str + "\n")
+
+                # Çeviri gerekli ise arka planda çevir, 'provisional' güncelleme
+                # olarak aynı segment_index'e gönder. (CLI modunda diarization
+                # güncellemesi zaten çevrilmiş metni basar; ikinci bir baskı yok.)
+                if (is_translation_needed and translation_engine and results
+                        and on_transcription and translation_executor):
+                    _submit_final_translation(
+                        translation_executor, translation_engine, on_transcription,
+                        [dict(r) for r in results], segment_index,
+                        source_lang, target_lang,
+                    )
 
                 # Queue for background diarization.
                 # Çevrilmemiş per-segment (kelime damgalı) sonuçları gönderiyoruz;
@@ -268,6 +348,7 @@ def _worker_loop(audio_queue, diarization_queue, ai_worker, translation_engine, 
                     # perf: gecikme/RTF için zaman damgaları
                     "captured_at": captured_at,
                     "stt_ms": stt_ms,
+                    "enqueued_at": time.time(),  # kuyruk bekleme telemetrisi
                 })
                 segment_index += 1
             else:
@@ -277,7 +358,18 @@ def _worker_loop(audio_queue, diarization_queue, ai_worker, translation_engine, 
                     formatted_str = ""
 
                 if formatted_str:
-                    if on_transcription:
+                    if (is_translation_needed and translation_engine
+                            and on_transcription and translation_executor):
+                        # Çevrilmiş partial'ı arka planda üret; bayat olanlar
+                        # nesil sayacıyla düşer (worker asla bloklanmaz).
+                        partial_gen["value"] += 1
+                        _submit_partial_translation(
+                            translation_executor, translation_engine,
+                            on_transcription, formatted_str,
+                            partial_gen, partial_gen["value"],
+                            source_lang, target_lang,
+                        )
+                    elif on_transcription:
                         on_transcription({"type": "partial", "text": formatted_str})
                     else:
                         print(f"\r\033[K[Canlı] {formatted_str}", end="", flush=True)
@@ -306,7 +398,11 @@ def _update_recording_state(state: RecordingState, data: bytes, is_speech: bool)
     """
     frame_idx = state.total_frames
     state.total_frames += 1
-    state.frames.append(data)
+    # Tüm oturum sesi yalnızca kaydetme AÇIKKEN biriktirilir. Koşulsuz
+    # biriktirme, SAVE_AUDIO_FILE=false iken bile ~190 KB/s (~700 MB/saat)
+    # ölü RAM + büyüyen GC duraksamaları demekti.
+    if SAVE_AUDIO_FILE:
+        state.frames.append(data)
 
     if is_speech:
         if not state.has_spoken:
@@ -419,6 +515,7 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
     diarization_queue = queue.Queue()
     ai_thread = None
     diarization_thread = None
+    translation_executor = None
     state = RecordingState()
     channels = None
     rate = None
@@ -477,9 +574,21 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
             
         print(f"[Çeviri Motoru Yüklendi] Motor: {engine_name}")
 
+        # LRU çeviri cache'i: aynı metni (anlık final + diarization geçişi)
+        # iki kez çevirmeyi önler — online motorlarda ağ turu tasarrufu.
+        if translation_engine is not None:
+            translation_engine = CachingTranslationEngine(translation_engine)
+
+        # Çeviri yürütücüsü: ağ/CPU çevirilerini ASR ve capture thread'lerinden
+        # tamamen çıkarır (tek işçi; partial'larda "en yenisi kazanır").
+        translation_executor = futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="translate"
+        )
+
         ai_thread = threading.Thread(
             target=_worker_loop,
-            args=(audio_queue, diarization_queue, ai_worker, translation_engine, get_lang_pair, on_transcription),
+            args=(audio_queue, diarization_queue, ai_worker, translation_engine,
+                  get_lang_pair, on_transcription, translation_executor),
             daemon=True,
         )
         ai_thread.start()
@@ -505,17 +614,32 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
         if on_status_change:
             on_status_change(msg)
 
+        last_status = None
+        last_status_emit = 0.0
+
         while not _should_stop(stop_event):
             data = stream.read(frame_size, exception_on_overflow=False)
             is_speech, confidence = vad_engine.check_speech(data, rate, channels)
             status = _update_recording_state(state, data, is_speech)
 
-            # Send partial update if speech is active and we've gathered enough frames (every ~300ms)
-            if state.has_spoken and len(state.chunk_buffer) > 0 and len(state.chunk_buffer) % 10 == 0:
+            # Partial güncelleme: buffer kısayken ~300 ms'de, uzadıkça ~600 ms'de
+            # bir. Backpressure: worker hâlâ bir görevi işliyorsa YENİ partial
+            # enqueue edilmez — GPU'yu bayat partial'larla doldurup final'leri
+            # bekletmenin anlamı yok (partial cadansı decode hızına uyarlanır).
+            # Pencere: yalnızca buffer'ın SON PARTIAL_WINDOW_MS kısmı decode
+            # edilir; final her zaman TAM buffer'ı görür (kalite değişmez).
+            n_buf = len(state.chunk_buffer)
+            partial_interval = 10 if n_buf <= 100 else 20
+            if (state.has_spoken and n_buf > 0
+                    and n_buf % partial_interval == 0
+                    and audio_queue.unfinished_tasks == 0):
+                window = state.chunk_buffer[-PARTIAL_WINDOW_FRAMES:]
                 audio_queue.put({
                     "type": "partial",
-                    "data": b"".join(state.chunk_buffer),
-                    "trim_prefix_ms": state.trim_ms,
+                    "data": b"".join(window),
+                    # Pencere buffer başını dışarıda bıraktıysa overlap öneki
+                    # zaten pencere dışındadır — trim gereksiz.
+                    "trim_prefix_ms": state.trim_ms if n_buf <= PARTIAL_WINDOW_FRAMES else 0,
                 })
 
             flush_reason = _flush_chunk_if_ready(state, audio_queue)
@@ -525,9 +649,16 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
                     # Konuşma arası: Silero RNN durumu sonsuza dek taşınmasın.
                     vad_engine.reset_stream()
 
-            print(f"Durum: {status} | AI: {confidence:.2f}       ", end="\r")
-            if on_status_change:
-                on_status_change(f"{status} (AI: {confidence:.2f})")
+            # Durum güncellemesi: metin değiştiğinde anında, aksi halde en çok
+            # 5 Hz. (Eski hali her 30 ms frame'de print + Qt sinyali + stil
+            # yenileme tetikliyordu.)
+            now = time.time()
+            if status != last_status or (now - last_status_emit) >= STATUS_EMIT_INTERVAL_S:
+                print(f"Durum: {status} | AI: {confidence:.2f}       ", end="\r")
+                if on_status_change:
+                    on_status_change(f"{status} (AI: {confidence:.2f})")
+                last_status = status
+                last_status_emit = now
 
     except Exception as exc:
         logger.exception("Main loop failed")
@@ -551,6 +682,9 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
             diarization_thread.join(timeout=30)
             if diarization_thread.is_alive():
                 logger.warning("Diarization worker did not shut down within 30s")
+
+        if translation_executor is not None:
+            translation_executor.shutdown(wait=False)
 
         if channels is not None and rate is not None:
             sample_width = p.get_sample_size(FORMAT)

@@ -38,6 +38,7 @@ class Settings:
     max_chunk_duration_ms: int
     pre_roll_ms: int
     chunk_overlap_ms: int
+    partial_window_ms: int
     vad_aggressiveness: int
     silero_threshold: float
     hf_token: str | None
@@ -109,6 +110,12 @@ def load_settings() -> Settings:
         # önek transkripsiyondan kırpılır (çift sayım olmaz), ama Whisper kesim
         # noktasındaki kelimeyi tam bağlamla görür.
         chunk_overlap_ms=int(os.getenv("CHUNK_OVERLAP_MS", "480")),
+        # Kısmi (partial) transkripsiyon penceresi: canlı satır için buffer'ın
+        # yalnızca SON bu kadar ms'i decode edilir. Tüm buffer'ı her 300 ms'de
+        # yeniden decode etmek O(n^2) GPU işiydi (9 sn'lik chunk ~135 sn ses
+        # decode ettiriyordu) ve final'lerin kuyrukta beklemesine yol açıyordu.
+        # FINAL transkripsiyon her zaman TAM buffer'ı görür — kalite değişmez.
+        partial_window_ms=int(os.getenv("PARTIAL_WINDOW_MS", "4000")),
         # VAD varsayılanları CHiME-6 taramasının (output/vad_sweep*.csv)
         # optimum bölgesine ayarlı: aggr=2 / silero=0.70. Not: Silero artık
         # kesintisiz 512-örnek akışla beslendiği için eşik semantiği eski
@@ -196,6 +203,7 @@ SOFT_CHUNK_DURATION_MS = settings.soft_chunk_duration_ms
 MAX_CHUNK_DURATION_MS = settings.max_chunk_duration_ms
 PRE_ROLL_MS = settings.pre_roll_ms
 CHUNK_OVERLAP_MS = settings.chunk_overlap_ms
+PARTIAL_WINDOW_MS = settings.partial_window_ms
 VAD_AGGRESSIVENESS = settings.vad_aggressiveness
 SILERO_THRESHOLD = settings.silero_threshold
 HF_TOKEN = settings.hf_token

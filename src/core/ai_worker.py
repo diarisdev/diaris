@@ -23,6 +23,7 @@ Warm-up mekanizması:
 
 import logging
 import os
+import time
 import numpy as np
 import torch
 from faster_whisper import WhisperModel
@@ -171,6 +172,27 @@ class AIWorker:
         self._runtime_config_path = prepare_runtime_config(config_path)
         return self._runtime_config_path
 
+    def _warm_up_inference(self):
+        """Tüm modellerden 1 sn'lik sessiz-yakını ses geçirip kernelleri ısıtır."""
+        try:
+            t0 = time.perf_counter()
+            # Saf sıfır yerine düşük genlikli gürültü: bazı katmanlar tam-sıfır
+            # girdide kısa devre yapıp gerçek kernelleri ısıtmayabilir.
+            warm_audio = (np.random.default_rng(0).standard_normal(16000) * 0.01).astype(np.float32)
+
+            segments, _ = self.transcriber.transcribe(warm_audio, beam_size=1, language=WHISPER_LANGUAGE)
+            list(segments)  # transcribe lazy generator — decode'u tetikle
+
+            warm_wave = torch.from_numpy(warm_audio).unsqueeze(0)
+            self.diarizer({"waveform": warm_wave, "sample_rate": 16000})
+
+            if self.embedding_model is not None:
+                self.embedding_model({"waveform": warm_wave, "sample_rate": 16000})
+
+            print(f"[AI Worker] Warm-up inference done ({(time.perf_counter() - t0) * 1000:.0f} ms)")
+        except Exception as warm_err:
+            logger.warning("Warm-up inference failed (non-fatal): %s", warm_err)
+
     @staticmethod
     def _get_short_path(long_path):
         """Windows 8.3 kısa yol (diarization_config'e delege)."""
@@ -247,6 +269,12 @@ class AIWorker:
                 WHISPER_PATH, device=DEVICE, compute_type=COMPUTE_TYPE
             )
             self._loaded = True
+
+            # Isınma inferansı: CUDA kernel autotune / cudnn plan / CT2 ilk-koşu
+            # maliyetlerini İLK GERÇEK chunk yerine başlangıçta öde. Bunsuz ilk
+            # altyazı 2-5 sn gecikiyordu. Çıktılar atılır; hata ölümcül değildir.
+            self._warm_up_inference()
+
             warmup_sec = DIARIZATION_WARMUP_MS / 1000
             print(f"[AI Worker] Models loaded. Warm-up: {warmup_sec:.0f}s\n")
             return True

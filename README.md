@@ -79,6 +79,7 @@ python main.py --cli    # Terminal modu (Ctrl+Q ile durdur)
 | `MAX_CHUNK_DURATION_MS` | `10000` | Maks chunk süresi |
 | `PRE_ROLL_MS` | `240` | Konuşma öncesi chunk'a eklenen ham ses (onset koruması) |
 | `CHUNK_OVERLAP_MS` | `480` | Max-süre kesmesinde sonraki chunk'a taşınan overlap |
+| `PARTIAL_WINDOW_MS` | `4000` | Canlı satır için decode edilen buffer kuyruğu (final tam buffer görür) |
 | `DIARIZATION_EMBEDDING_THRESHOLD` | `0.66` | Konuşmacı eşleme cosine similarity eşiği |
 | `DIARIZATION_WARMUP_MS` | `20000` | Warm-up süresi (embedding toplama) |
 | `CANDIDATE_CONFIRMATIONS_NEEDED` | `2` | Yeni konuşmacı için gereken gözlem sayısı |
