@@ -154,6 +154,7 @@ full list). The knobs that matter most:
 | `WHISPER_LANGUAGE` | `en` | Transcription language |
 | `TRANSLATION_ENGINE` | *(auto)* | `google` \| `deepl` \| `ctranslate2`; empty = DeepL key → local NLLB → Google |
 | `VAD_AGGRESSIVENESS` | `2` | WebRTC gate strictness (0–3) |
+| `VAD_USE_WEBRTC` | `true` | Disable to let Silero decide alone (A/B it with `scripts/vad_webrtc_ablation.py`) |
 | `SILERO_THRESHOLD` | `0.70` | Neural VAD speech-confidence threshold |
 | `DIARIZATION_EMBEDDING_THRESHOLD` | `0.66` | Speaker-match cosine threshold — the main diarization knob |
 | `DIARIZATION_WARMUP_MS` | `20000` | Initial calibration window for speaker clustering |

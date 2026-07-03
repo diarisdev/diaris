@@ -20,7 +20,7 @@ import numpy as np
 import torch
 import webrtcvad
 
-from ..config import VAD_AGGRESSIVENESS, SILERO_THRESHOLD
+from ..config import VAD_AGGRESSIVENESS, VAD_USE_WEBRTC, SILERO_THRESHOLD
 
 # WebRTC yalnızca bu örnekleme hızlarını destekler; diğer hızlarda WebRTC
 # katmanı atlanır (karar tamamen Silero'ya kalır).
@@ -113,18 +113,26 @@ class VADEngine:
     Karar = WebRTC VE Silero (WebRTC desteklemeyen hızlarda yalnız Silero).
     Silero, WebRTC kararından bağımsız olarak HER frame'i görür — RNN durumu
     kesintisiz kalır; WebRTC yalnızca nihai karara oy verir.
+
+    VAD_USE_WEBRTC=false ile WebRTC katmanı tamamen devre dışı bırakılabilir
+    (karar yalnız Silero). AND-kapısı yalnızca kaçırma ekleyip yanlış alarmı
+    azaltabilir; miss-baskın hata profilinde katkısı şüphelidir —
+    scripts/vad_webrtc_ablation.py ile ölçün.
     """
 
-    def __init__(self, aggressiveness=None, threshold=None):
+    def __init__(self, aggressiveness=None, threshold=None, use_webrtc=None):
         """
         Args:
             aggressiveness: WebRTC agresiflik seviyesi (0-3). None ise config'den alınır.
             threshold: Silero güven eşiği. None ise config'den alınır.
+            use_webrtc: WebRTC katmanı karara katılsın mı. None ise config'den
+                (VAD_USE_WEBRTC) alınır. False ise karar yalnız Silero'dur.
         """
         self.aggressiveness = aggressiveness if aggressiveness is not None else VAD_AGGRESSIVENESS
         self.threshold = threshold if threshold is not None else SILERO_THRESHOLD
+        self.use_webrtc = use_webrtc if use_webrtc is not None else VAD_USE_WEBRTC
 
-        self.webrtc_vad = webrtcvad.Vad(self.aggressiveness)
+        self.webrtc_vad = webrtcvad.Vad(self.aggressiveness) if self.use_webrtc else None
         self.silero_model, _ = load_silero_vad()
 
         self._resampler: StreamingResampler | None = None
@@ -157,7 +165,9 @@ class VADEngine:
         return mono / 32768.0
 
     def _webrtc_vote(self, mono_float: np.ndarray, rate: int) -> bool:
-        """WebRTC oyu. Desteklenmeyen hız/frame boyutunda 'geçir' (True) döner."""
+        """WebRTC oyu. Kapalıysa veya desteklenmeyen hız/frame boyutunda 'geçir' (True)."""
+        if self.webrtc_vad is None:
+            return True
         if rate not in _WEBRTC_RATES:
             return True
         expected = int(rate * 30 / 1000)

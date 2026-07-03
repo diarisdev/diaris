@@ -40,6 +40,7 @@ class Settings:
     chunk_overlap_ms: int
     partial_window_ms: int
     vad_aggressiveness: int
+    vad_use_webrtc: bool
     silero_threshold: float
     hf_token: str | None
     local_models_dir: Path
@@ -121,6 +122,12 @@ def load_settings() -> Settings:
         # kesintisiz 512-örnek akışla beslendiği için eşik semantiği eski
         # (padding'li) kuruluma göre daha keskin; yeniden tarama önerilir.
         vad_aggressiveness=int(os.getenv("VAD_AGGRESSIVENESS", "2")),
+        # WebRTC katmanı AND-kapısı olarak oy kullanır. Silero artık her frame'de
+        # zaten çalıştığı için (RNN durum sürekliliği) WebRTC hesaplama tasarrufu
+        # sağlamaz; tek etkisi kaçırma (miss) ekleyip yanlış alarmı azaltmaktır.
+        # DER profili miss-baskın olduğundan kapatmak muhtemelen nötr/daha iyi —
+        # scripts/vad_webrtc_ablation.py ile A/B ölçün.
+        vad_use_webrtc=_env_bool("VAD_USE_WEBRTC", True),
         silero_threshold=float(os.getenv("SILERO_THRESHOLD", "0.70")),
         hf_token=os.getenv("HF_TOKEN"),
         local_models_dir=local_models_dir,
@@ -205,6 +212,7 @@ PRE_ROLL_MS = settings.pre_roll_ms
 CHUNK_OVERLAP_MS = settings.chunk_overlap_ms
 PARTIAL_WINDOW_MS = settings.partial_window_ms
 VAD_AGGRESSIVENESS = settings.vad_aggressiveness
+VAD_USE_WEBRTC = settings.vad_use_webrtc
 SILERO_THRESHOLD = settings.silero_threshold
 HF_TOKEN = settings.hf_token
 LOCAL_MODELS_DIR = str(settings.local_models_dir)
