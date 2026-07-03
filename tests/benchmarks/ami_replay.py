@@ -316,7 +316,7 @@ def main() -> None:
                          "için canlı varsayılandan (3) daha hassas; .env/canlı etkilenmez.")
     ap.add_argument("--vad-silero-threshold", type=float, default=0.2,
                     help="Silero VAD güven eşiği (düşük = daha hassas).")
-    ap.add_argument("--embedding-threshold", type=float, default=0.70,
+    ap.add_argument("--embedding-threshold", type=float, default=0.55,
                     help="Konuşmacı eşleştirme eşiği (eval'e özel; .env/canlı etkilenmez). "
                          "4-toplantı süpürmesinde 0.70 aggregate-optimal bulundu.")
     ap.add_argument("--verbose", action="store_true",
