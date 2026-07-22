@@ -11,13 +11,19 @@ import numpy as np
 import torch
 import torchaudio
 
+from ..config import LOCAL_MODELS_DIR
+from .silero import load_silero_vad as _load_silero_vad
+
 logger = logging.getLogger(__name__)
 
 
 def load_silero_vad():
-    """Load Silero VAD through one mockable boundary."""
-    model, utils = torch.hub.load("snakers4/silero-vad", "silero_vad", trust_repo=True)
-    return model, utils
+    """Load Silero VAD through one mockable boundary.
+
+    Backend seçimi src/audio/silero.py'de: ONNX (hızlı, çevrimdışı) varsa o,
+    yoksa torch.hub. utils[0] her iki durumda da get_speech_timestamps'tir.
+    """
+    return _load_silero_vad(models_dir=LOCAL_MODELS_DIR)
 
 
 # Normalizasyon sabitleri

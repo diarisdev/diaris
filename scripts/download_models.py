@@ -43,6 +43,45 @@ MODEL_SPECS = [
 ]
 
 
+SILERO_ONNX_TARGET = MODELS_DIR / "silero_vad.onnx"
+# Silero VAD ONNX. torch.hub önbelleğinde zaten varsa oradan kopyalanır (ağ
+# gerekmez); yoksa resmî depodan indirilir. Bu dosya, çalışma anında GitHub'a
+# çıkan torch.hub çağrısını ortadan kaldırır — paketleme (.exe) için şart.
+SILERO_ONNX_URL = (
+    "https://raw.githubusercontent.com/snakers4/silero-vad/master/"
+    "src/silero_vad/data/silero_vad.onnx"
+)
+SILERO_HUB_CACHE = (
+    Path.home() / ".cache" / "torch" / "hub" / "snakers4_silero-vad_master"
+    / "src" / "silero_vad" / "data" / "silero_vad.onnx"
+)
+
+
+def ensure_silero_onnx(force: bool = False) -> bool:
+    """models/silero_vad.onnx dosyasını hazırlar (kopyala ya da indir)."""
+    if SILERO_ONNX_TARGET.is_file() and not force:
+        print(f"✅ Silero VAD (ONNX) zaten mevcut: {SILERO_ONNX_TARGET}")
+        return True
+
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    if SILERO_HUB_CACHE.is_file():
+        import shutil
+        shutil.copy2(SILERO_HUB_CACHE, SILERO_ONNX_TARGET)
+        print(f"✅ Silero VAD (ONNX) torch.hub önbelleğinden kopyalandı: {SILERO_ONNX_TARGET}")
+        return True
+
+    print("⬇️ Silero VAD (ONNX) indiriliyor...")
+    try:
+        import urllib.request
+        urllib.request.urlretrieve(SILERO_ONNX_URL, SILERO_ONNX_TARGET)
+        print(f"✅ Silero VAD (ONNX) indirildi: {SILERO_ONNX_TARGET}")
+        return True
+    except Exception as exc:
+        print(f"⚠️  Silero VAD (ONNX) indirilemedi: {exc}")
+        print("   Sistem torch.hub yoluna düşecek (çalışır ama daha yavaş ve ağ ister).")
+        return False
+
+
 def _has_files(path: Path) -> bool:
     """Check if directory contains actual model weight files (not just metadata)."""
     if not path.exists():
@@ -88,6 +127,9 @@ def download_models(force: bool = False) -> bool:
         except Exception as exc:
             print(f"❌ {name} indirilemedi: {exc}")
             return False
+
+    # Silero VAD (ONNX) — zorunlu değil; başarısız olursa torch.hub yoluna düşülür.
+    ensure_silero_onnx(force=force)
 
     print(f"✅ Modeller hazır: {MODELS_DIR}")
     return True

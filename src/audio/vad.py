@@ -20,7 +20,10 @@ import numpy as np
 import torch
 import webrtcvad
 
-from ..config import VAD_AGGRESSIVENESS, VAD_USE_WEBRTC, SILERO_THRESHOLD
+from ..config import (
+    VAD_AGGRESSIVENESS, VAD_USE_WEBRTC, SILERO_THRESHOLD, LOCAL_MODELS_DIR,
+)
+from .silero import load_silero_vad as _load_silero_vad
 
 # WebRTC yalnızca bu örnekleme hızlarını destekler; diğer hızlarda WebRTC
 # katmanı atlanır (karar tamamen Silero'ya kalır).
@@ -30,9 +33,13 @@ _SILERO_WINDOW = 512  # Silero'nun 16 kHz'de beklediği örnek sayısı
 
 
 def load_silero_vad():
-    """Load Silero VAD through one mockable boundary."""
-    model, utils = torch.hub.load("snakers4/silero-vad", "silero_vad", trust_repo=True)
-    return model, utils
+    """Load Silero VAD through one mockable boundary.
+
+    Backend seçimi src/audio/silero.py'ye devredildi: ONNX (hızlı, çevrimdışı)
+    varsa onu, yoksa eski torch.hub yolunu kullanır. Çağrı sözleşmesi (model
+    ve utils) her iki backend'de aynıdır.
+    """
+    return _load_silero_vad(models_dir=LOCAL_MODELS_DIR)
 
 
 class StreamingResampler:
