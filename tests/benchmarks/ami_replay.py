@@ -64,6 +64,7 @@ configure_cuda_dll_paths()
 from src.config import FRAME_DURATION_MS
 from src.audio.vad import VADEngine
 from src.core.ai_worker import AIWorker
+from src.core.speaker_refinement import RefinementConfig, refine_speakers
 from tests.benchmarks._eval_worker import EvalAIWorker
 from src.pipeline import RecordingState, _update_recording_state, _flush_chunk_if_ready
 
@@ -319,6 +320,11 @@ def main() -> None:
     ap.add_argument("--embedding-threshold", type=float, default=0.55,
                     help="Konuşmacı eşleştirme eşiği (eval'e özel; .env/canlı etkilenmez). "
                          "4-toplantı süpürmesinde 0.70 aggregate-optimal bulundu.")
+    ap.add_argument("--no-refine", action="store_true",
+                    help="Son-işleme (speaker_refinement) katmanını kapat. A/B için: "
+                         "açıkken 8-toplantı ölçümünde Conf 10.86->10.19, "
+                         "cpWER 50.87->49.59. Segments/ çıktısı refinement SONRASI "
+                         "durumu yansıtır.")
     ap.add_argument("--verbose", action="store_true",
                     help="Chunk-başı worker loglarını göster. Varsayılan: bastırılır "
                          "(temiz ilerleme çubuğu + daha az stdout I/O).")
@@ -349,6 +355,7 @@ def main() -> None:
 
     (args.out / "rttm").mkdir(parents=True, exist_ok=True)
     (args.out / "transcripts").mkdir(parents=True, exist_ok=True)
+    (args.out / "segments").mkdir(parents=True, exist_ok=True)
 
     print(f"[Replay] Referans dizini: {args.refs.resolve()}")
     print(f"[Replay] Çıktı dizini: {args.out.resolve()}")
@@ -427,12 +434,47 @@ def main() -> None:
         # Hayalet (çok kısa) konuşmacıları en yakın gerçek konuşmacıya birleştir.
         results = prune_tiny_speakers(results, args.prune_speaker_sec)
 
+        # --- Son-işleme (refinement) ---------------------------------------
+        # Canlı takip kararlarını geri alamaz; bu katman tüm zaman çizelgesine
+        # bakıp yalnızca tamamlanmış görüntüde belli olan hataları düzeltir
+        # (dağınık hayalet profiller komşu oylamasıyla sahibine döner).
+        # Ölçüm (8 toplantı): Conf 10.86 -> 10.19, DER 34.45 -> 33.78,
+        # cpWER 50.87 -> 49.59, konuşmacı 75 -> 55. WER değişmez.
+        # NOT: prune_tiny_speakers "zamanca en yakın"a birleştirir; refinement
+        # ise komşu OYLAMASI + ada istatistikleri kullanır (daha isabetli).
+        # segments/ HER ZAMAN refinement ÖNCESİ durumu saklar: bu dosyalar
+        # offline deneylerin (refine_experiment / refine_sweep) girdisidir.
+        # Refinement sonrası kaydedilseydi kurallar ikinci kez uygulanır ve
+        # baseline ölçülemez hale gelirdi.
+        raw_segments = [{"speaker": normalize_speaker(r["speaker"]),
+                         "start": round(float(r["start"]), 3),
+                         "end": round(float(r["end"]), 3),
+                         "text": r.get("text", "")}
+                        for r in sorted(results, key=lambda x: x["start"])]
+
+        if not args.no_refine:
+            results, refine_stats = refine_speakers(raw_segments, RefinementConfig())
+            if refine_stats.get("total"):
+                real_out.write(
+                    f"   [Refinement] {refine_stats['total']} segment yeniden "
+                    f"etiketlendi (small_island={refine_stats.get('small_island_merge', 0)}, "
+                    f"tiny_frag={refine_stats.get('tiny_fragmented_merge', 0)}, "
+                    f"unknown_fill={refine_stats.get('unknown_fill', 0)})\n")
+                real_out.flush()
+
         (args.out / "rttm" / f"{mid}.rttm").write_text(
             results_to_rttm(mid, results), encoding="utf-8"
         )
         (args.out / "transcripts" / f"{mid}.json").write_text(
             json.dumps(results_to_speaker_transcript(results),
                        ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        # HAM segmentler (refinement ÖNCESİ). RTTM'de metin, transcripts'te
+        # segment ayrımı yok; son-işleme deneylerinin GPU'suz ve replay'siz
+        # tekrarlanabilmesi için ham listeyi ayrıca saklıyoruz.
+        (args.out / "segments" / f"{mid}.json").write_text(
+            json.dumps(raw_segments, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 

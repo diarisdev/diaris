@@ -64,6 +64,34 @@ class SpeakerTracker:
     RESERVOIR_SIZE = 8            # konuşmacı başına saklanan max embedding
     RESERVOIR_ADD_THRESHOLD = 0.85  # rezervuara ekleme için min eşleşme skoru (drift önleme)
 
+    # --- Karar kalitesi sabitleri -------------------------------------- #
+    # 1) MARGIN: en iyi ile ikinci en iyi konuşmacı arasındaki fark. İki profil
+    #    neredeyse berabereyse eşiği geçmek tek başına bir şey ifade etmez —
+    #    atama yazı-tura olur. Bu durumda etiket yine verilir (en iyi tahmin)
+    #    ama profil GÜNCELLENMEZ; belirsiz ses profili kirletirse sonraki
+    #    chunk'larda karışıklık (DER confusion) katlanarak büyür.
+    MIN_DECISION_MARGIN = 0.06
+
+    # 2) SÜRE KALİTESİ: kısa sesten çıkan embedding gürültülüdür. Sert eşikle
+    #    atmak yerine (bilgi kaybı) eşleşme eşiğini geçici olarak yükseltiriz.
+    #    quality: 0.25 (çok kısa) .. 1.0 (>= QUALITY_FULL_SEC)
+    QUALITY_MIN_SEC = 0.35        # bu sürenin altı zaten embedding'e girmez
+    QUALITY_FULL_SEC = 2.2        # bu süreden sonrası tam kalite
+    QUALITY_THRESHOLD_PENALTY = 0.08   # düşük kalitede eşiğe eklenen max ceza
+
+    # 3) OLGUNLUK: az konuşmuş (genç) bir profil, yeni sesi sahiplenmek için
+    #    daha güçlü kanıt istemelidir. Hayalet konuşmacıların kendilerini
+    #    beslemesini engeller; ses olgun/gerçek konuşmacıya gitmeye meyleder.
+    MATURITY_FULL_SEC = 8.0            # bu kadar konuşmadan sonra tam olgun
+    MATURITY_BASE = 0.45               # sıfır konuşmalı profilin olgunluğu
+    # Ablasyon ölçümü (IS1009a): cezayı 0.0'a çekmek TÜM metrikleri kötüleştirdi
+    # (cpWER 59.40 → 59.95, DER 40.96 → 41.22, confusion 15.29 → 15.50) ve
+    # konuşmacı sayısı 9 → 10'a ÇIKTI. Yani olgunluk cezası konuşmacı şişmesinin
+    # sebebi değil, küçük ama net bir katkı. Bu yüzden geri açıldı; eşik artık
+    # konuşmacı-başına uygulanıyor (bkz. map_speakers) — genç top-1 elenince ses
+    # olgun ikinciye düşüyor, aday tamponuna gitmiyor.
+    MATURITY_THRESHOLD_PENALTY = 0.06  # genç profile eklenen max eşik cezası
+
     def __init__(self, threshold=None, warmup_ms=None):
         self.threshold = threshold if threshold is not None else DIARIZATION_EMBEDDING_THRESHOLD
         self.warmup_ms = warmup_ms if warmup_ms is not None else DIARIZATION_WARMUP_MS
@@ -71,6 +99,8 @@ class SpeakerTracker:
         # Bilinen konuşmacılar (warm-up sonrası dolu olur)
         self.known_speakers = {}  # {global_label: centroid_tensor}
         self._reservoirs = {}     # {global_label: [embedding_tensor, ...]} (en yeni sonda)
+        # Konuşmacı başına biriken temiz konuşma süresi (sn) — olgunluk ölçüsü.
+        self._speech_seconds = {}
         self._next_id = 0
 
         # Warm-up state
@@ -87,6 +117,7 @@ class SpeakerTracker:
         """Tracker durumunu sıfırlayarak yeni bir dosya için hazır hale getirir."""
         self.known_speakers = {}
         self._reservoirs = {}
+        self._speech_seconds = {}
         self._next_id = 0
         self._warmup_buffer = []
         self._warmup_audio_ms = 0
@@ -106,13 +137,61 @@ class SpeakerTracker:
     # ------------------------------------------------------------------ #
     # Rezervuar yardımcıları
     # ------------------------------------------------------------------ #
-    def _register_speaker(self, embeddings: list) -> str:
-        """Yeni konuşmacı oluşturur: rezervuar + normalize centroid."""
+    def _register_speaker(self, embeddings: list, seed_seconds: float | None = None) -> str:
+        """Yeni konuşmacı oluşturur: rezervuar + normalize centroid.
+
+        seed_seconds: profilin başlangıç "olgunluk" kredisi. Verilmezse gözlem
+        başına 1 sn sayılır — böylece warm-up'ta çok gözlemle kurulan profiller
+        olgun, aday kapısından 2 gözlemle geçen yeni profiller GENÇ başlar
+        (genç profil yeni sesi sahiplenmek için daha güçlü kanıt ister).
+        """
         label = self._next_label()
         reservoir = [e.cpu() for e in embeddings[-self.RESERVOIR_SIZE:]]
         self._reservoirs[label] = reservoir
         self.known_speakers[label] = _normalized_mean(reservoir)
+        if seed_seconds is None:
+            seed_seconds = float(len(embeddings))
+        self._speech_seconds[label] = max(0.0, seed_seconds)
         return label
+
+    # ------------------------------------------------------------------ #
+    # Karar kalitesi yardımcıları (margin / süre kalitesi / olgunluk)
+    # ------------------------------------------------------------------ #
+    def _duration_quality(self, duration: float) -> float:
+        """Süreden [0.25, 1.0] aralığında kalite katsayısı.
+
+        Süre bilinmiyorsa (None/inf) cezalandırmadan 1.0 döner.
+        """
+        if duration is None or duration == float("inf"):
+            return 1.0
+        span = self.QUALITY_FULL_SEC - self.QUALITY_MIN_SEC
+        if span <= 0:
+            return 1.0
+        return max(0.25, min(1.0, (duration - self.QUALITY_MIN_SEC) / span))
+
+    def _maturity(self, label: str) -> float:
+        """Profilin olgunluğu [MATURITY_BASE, 1.0] — biriken konuşma süresine göre."""
+        if not label:
+            return 1.0
+        seconds = self._speech_seconds.get(label, 0.0)
+        grown = (1.0 - self.MATURITY_BASE) * (seconds / self.MATURITY_FULL_SEC)
+        return min(1.0, self.MATURITY_BASE + grown)
+
+    def _effective_threshold(self, quality: float, maturity: float) -> float:
+        """Kısa ses ve genç profil için eşiği geçici olarak yükseltir."""
+        return (
+            self.threshold
+            + (1.0 - quality) * self.QUALITY_THRESHOLD_PENALTY
+            + (1.0 - maturity) * self.MATURITY_THRESHOLD_PENALTY
+        )
+
+    def _accumulate_speech(self, label: str, duration: float) -> None:
+        """Atanan sesin süresini profilin olgunluk hanesine yazar."""
+        if not label or label == "Unknown":
+            return
+        if duration is None or duration == float("inf"):
+            return
+        self._speech_seconds[label] = self._speech_seconds.get(label, 0.0) + max(0.0, duration)
 
     def _add_observation(self, label: str, emb: torch.Tensor) -> None:
         """Güçlü eşleşen embedding'i rezervuara ekler, centroid'i türetir."""
@@ -123,6 +202,8 @@ class SpeakerTracker:
             existing = self.known_speakers.get(label)
             reservoir = [existing.clone()] if existing is not None else []
             self._reservoirs[label] = reservoir
+            # Dış kod yazdıysa olgunluk kaydı da yoktur — nötr başlat.
+            self._speech_seconds.setdefault(label, 0.0)
         reservoir.append(emb.clone())
         if len(reservoir) > self.RESERVOIR_SIZE:
             reservoir.pop(0)
@@ -334,6 +415,12 @@ class SpeakerTracker:
                         self.known_speakers[keep] = _normalized_mean(merged_reservoir)
                         del self.known_speakers[drop]
                         self._reservoirs.pop(drop, None)
+                        # Olgunluk da birleşir: iki profil aynı kişiyse konuşma
+                        # süreleri de aynı kişiye aittir.
+                        self._speech_seconds[keep] = (
+                            self._speech_seconds.get(keep, 0.0)
+                            + self._speech_seconds.pop(drop, 0.0)
+                        )
                         remap[drop] = keep
                         labels.pop(j)
                         print(f"  [Merge] {drop} -> {keep} (sim: {sim:.3f})")
@@ -372,30 +459,65 @@ class SpeakerTracker:
             duration = quality_dict.get(local_label, float("inf"))
             is_reliable = duration >= MIN_NEW_SPEAKER_DURATION
 
-            # Bilinen konuşmacılarla karşılaştır (rezervuar skoru)
-            best_match = None
-            best_score = -1.0
+            # Bilinen konuşmacıları skorla ve SIRALA — yalnız en iyi skor değil,
+            # en iyi ile ikinci arasındaki MARGIN de karara giriyor.
+            ranked = sorted(
+                ((self._similarity(emb, label), label) for label in self.known_speakers),
+                key=lambda item: item[0],
+                reverse=True,
+            )
+            # En yakın konuşmacı (ham skor) — sticky/raporlama için referans.
+            if ranked:
+                best_score, best_match = ranked[0]
+            else:
+                best_score, best_match = -1.0, None
+            # Margin HAM benzerlikler üzerinden: "iki konuşmacı akustik olarak
+            # neredeyse berabere mi?" sorusu eşiklerden bağımsızdır.
+            # Tek konuşmacı varsa rekabet yok → margin sonsuz kabul edilir.
+            margin = (best_score - ranked[1][0]) if len(ranked) > 1 else float("inf")
+            has_margin = margin >= self.MIN_DECISION_MARGIN
 
-            for global_label in self.known_speakers:
-                score = self._similarity(emb, global_label)
-                if score > best_score:
-                    best_score = score
-                    best_match = global_label
+            quality = self._duration_quality(duration)
+            maturity = self._maturity(best_match) if best_match else 1.0
+            effective_threshold = self._effective_threshold(quality, maturity)
 
-            if best_match and best_score >= self.threshold:
+            # SADECE en iyi eşleşme (top-1) eşiğe karşı sınanır.
+            #
+            # ÖLÇÜLMÜŞ UYARI — burada sıralı listede aşağı inip "kendi eşiğini
+            # geçen İLK konuşmacıyı" almak DENENDİ ve diarization'ı ciddi biçimde
+            # bozdu (IS1009a: confusion 15.29 → 23.23, cpWER 59.40 → 69.12).
+            # Sebep: 10 konuşmacı varken yeni/belirsiz bir ses, listenin
+            # aşağısında eşiği geçen BİR profil neredeyse her zaman bulur; böylece
+            # "eşleşmedi → ertele" davranışı "tutana kadar ara" davranışına
+            # dönüşüp yanlış atama üretir. En-yakın-komşu mantığı gereği karar
+            # DAİMA en iyi adaya göre verilmeli; en iyi aday yeterli değilse
+            # daha kötü bir aday hiç değildir.
+            passes_threshold = best_match is not None and best_score >= effective_threshold
+
+            if passes_threshold:
+                # Etiket her iki durumda da verilir (en iyi tahmin), ama profil
+                # yalnızca KARARLI eşleşmede güncellenir.
                 mapping[local_label] = best_match
+                self._accumulate_speech(best_match, duration)
 
-                # Drift'i önle: rezervuara YALNIZCA yüksek güvenli eşleşmeler
-                # eklenir. Borderline eşleşmeler (threshold–0.85) rezervuarı
-                # kirletip baskın konuşmacının herkese benzemesine yol açabilir.
-                if best_score > self.RESERVOIR_ADD_THRESHOLD:
+                # Drift'i önle: rezervuara YALNIZCA yüksek güvenli, kararlı ve
+                # yeterli kaliteli eşleşmeler eklenir. Borderline ya da iki
+                # konuşmacı arasında kararsız sesler rezervuarı kirletip baskın
+                # konuşmacının herkese benzemesine yol açabilir.
+                if has_margin and best_score > self.RESERVOIR_ADD_THRESHOLD and quality >= 0.35:
                     self._add_observation(best_match, emb)
+                elif not has_margin:
+                    runner_up = ranked[1][1]
+                    print(f"  [Ambiguous] {best_match} vs {runner_up} "
+                          f"(margin: {margin:.3f} < {self.MIN_DECISION_MARGIN}) "
+                          f"— etiket verildi, profil güncellenmedi")
 
             elif not is_reliable:
                 # Bilinmeyen AMA kısa/güvenilmez ses → yeni konuşmacı YARATMA.
                 # En yakın mevcut konuşmacıya yapıştır (sticky). Bu, kısa
                 # cümlelerin ("evet") yeni konuşmacı doğurmasını engeller.
                 mapping[local_label] = best_match if best_match else "Unknown"
+                self._accumulate_speech(mapping[local_label], duration)
                 if best_match:
                     print(f"  [Short utterance] sticky -> {best_match} "
                           f"(score: {best_score:.3f}, {duration:.1f}s)")
@@ -413,6 +535,7 @@ class SpeakerTracker:
                     if promoted_label:
                         # Aday onaylandı, gerçek konuşmacı oldu
                         mapping[local_label] = promoted_label
+                        self._accumulate_speech(promoted_label, duration)
                         closest_info = f" (closest: {best_match}, score: {best_score:.3f})" if best_match else ""
                         confirms = len(self._candidates[cand_idx]["embeddings"])
                         # ASCII-only: emoji cp1254/cp1252 Windows konsollarında

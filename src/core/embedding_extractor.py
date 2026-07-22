@@ -14,7 +14,16 @@ import torch
 from ..audio.preprocessing import extract_speech_only
 
 # Minimum embedding requirements
-MIN_SPEECH_DURATION_FOR_EMBEDDING = 1.5  # saniye — embedding için min konuşma süresi
+#
+# NOT: Eskiden 1.5 sn'nin altındaki her ses TAMAMEN atılıyordu. Bu, gerçek
+# konuşmayı çöpe atıyordu: kısa ama net bir cümle ("evet, katılıyorum") hiç
+# embedding üretmiyor, konuşmacı takibi o sesi hiç görmüyordu. Artık sert taban
+# yalnızca embedding modelinin anlamlı çalışabildiği mutlak alt sınırdır;
+# 1.5 sn'nin altındaki sesler ELENMEZ, SpeakerTracker tarafında süre-kalitesi
+# katsayısıyla (daha yüksek eşleşme eşiği) düşük güvenle kullanılır.
+MIN_SPEECH_DURATION_FOR_EMBEDDING = 0.35  # saniye — mutlak alt sınır
+# Geriye dönük uyumluluk / dokümantasyon: "tam kalite" sayılan süre.
+PREFERRED_SPEECH_DURATION_FOR_EMBEDDING = 1.5
 MIN_AUDIO_RMS_FOR_EMBEDDING = 0.01       # min RMS enerji — sessizliği filtrele
 # Perf: embedding için konuşmacı başına kullanılacak max ses süresi. Daha uzun
 # ses embedding kalitesini kayda değer artırmaz ama Silero VAD'in Python döngüsü
