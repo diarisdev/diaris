@@ -69,6 +69,19 @@ still fail at runtime with `ModuleNotFoundError: No module named 'X'`.
 This is normal for this dependency tree — budget for a few rounds. Common additions:
 `sklearn.utils._*`, `scipy.*` C extensions, `speechbrain.*`, `asteroid_filterbanks.*`.
 
+### The GPU gotcha: `cublas64_12.dll is not found`
+
+If the app launches but produces no output and you see
+`Warm-up inference failed: Library cublas64_12.dll is not found`, the CUDA runtime
+DLLs aren't on the frozen app's search path. `ctranslate2`/`torch` load them **by name
+at runtime**, so PyInstaller's dependency scan misses them.
+
+This is handled: the spec now globs `site-packages/nvidia/*/bin/*.dll` and `torch/lib/*.dll`
+into the bundle root, and `configure_cuda_dll_paths()` adds the bundle dir to the DLL
+search path when frozen. If you still hit it, confirm the build venv actually has the
+`nvidia-cublas-cu12` wheel installed (`pip show nvidia-cublas-cu12`) and check the
+`[spec] CUDA/torch DLL toplandı: N` line during the build is non-zero.
+
 ---
 
 ## 5. Model delivery (recommended hybrid)

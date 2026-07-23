@@ -178,10 +178,17 @@ def configure_cuda_dll_paths() -> None:
     """Expose CUDA DLL folders installed by Python wheels or system toolkit on Windows."""
     dll_dirs_to_add: list[str] = []
 
-    # 1. Check Python wheel nvidia packages (e.g. nvidia-cublas-cu12).
-    # Donmuş (.exe) modda site.getsitepackages() bulunmaz; PyInstaller CUDA
-    # DLL'lerini _internal'a koyar ve yolu kendi ekler, bu yüzden atlanır.
-    if not getattr(sys, "frozen", False):
+    if getattr(sys, "frozen", False):
+        # Donmuş (.exe) modda CUDA DLL'leri (cublas64_12.dll vb.) spec tarafından
+        # bundle'a kopyalanır. ctranslate2/torch bunları ADLA (LoadLibrary) yükler,
+        # dolayısıyla dizinlerinin arama yolunda olması ŞART. Hem _MEIPASS
+        # (PyInstaller 6.x'te _internal) hem exe dizini (5.x düz yerleşim)
+        # eklenir — hangisi geçerliyse.
+        for base in {getattr(sys, "_MEIPASS", None), str(Path(sys.executable).resolve().parent)}:
+            if base and Path(base).is_dir():
+                dll_dirs_to_add.append(base)
+    else:
+        # 1. Check Python wheel nvidia packages (e.g. nvidia-cublas-cu12).
         try:
             site_packages = site.getsitepackages()
         except AttributeError:

@@ -78,6 +78,31 @@ for pkg in ("soundfile", "pyaudiowpatch"):
     except Exception:
         pass
 
+# --- CUDA runtime DLL'leri (yalnız GPU build; CPU venv'de nvidia wheel'leri yok) ---
+# ctranslate2 (faster-whisper) ve torch, cublas64_12.dll / cudnn*.dll gibi
+# kütüphaneleri ÇALIŞMA ANINDA adla yükler; PyInstaller bağımlılık taraması
+# bunları göremez, o yüzden ELLE topluyoruz. Bundle KÖKÜNE (".") konur ki
+# PyInstaller o dizini DLL arama yoluna eklesin (config.py de ekler).
+import glob as _glob
+import site as _site
+
+try:
+    _site_dirs = list(_site.getsitepackages())
+except AttributeError:
+    _site_dirs = []
+_cuda_dll_count = 0
+for _sp in _site_dirs:
+    # nvidia-*-cu12 wheel'leri: site-packages/nvidia/<lib>/bin/*.dll
+    for _dll in _glob.glob(os.path.join(_sp, "nvidia", "*", "bin", "*.dll")):
+        binaries.append((_dll, "."))
+        _cuda_dll_count += 1
+    # torch kendi CUDA kütüphanelerini torch/lib altında taşıyabilir
+    for _dll in _glob.glob(os.path.join(_sp, "torch", "lib", "*.dll")):
+        binaries.append((_dll, "."))
+        _cuda_dll_count += 1
+print(f"[spec] CUDA/torch DLL toplandı: {_cuda_dll_count} "
+      f"({'GPU build' if _cuda_dll_count else 'CPU build — CUDA yok'})")
+
 # --- Elle gereken gizli import'lar (grafik dışı) ---
 hiddenimports += [
     "webrtcvad",
