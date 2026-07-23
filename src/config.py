@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import site
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,7 +14,23 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+def _resolve_project_root() -> Path:
+    """Kullanıcı varlıklarının (models/, .env, output/) kök dizini.
+
+    Donmuş (.exe) modda bu, EXE'nin YANINDAKİ dizindir — modeller ve .env
+    kurulum konumunda tutulur, bundle'ın içine gömülmez (modeller GB'larca;
+    .env kullanıcıya ait). Kaynaktan çalışırken repo köküdür.
+
+    PyInstaller onedir'de sys.executable exe'yi, sys._MEIPASS ise salt-okunur
+    bundle'ı gösterir; kullanıcı varlıkları için exe dizinini kullanıyoruz.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[1]
+
+
+PROJECT_ROOT = _resolve_project_root()
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -161,14 +178,22 @@ def configure_cuda_dll_paths() -> None:
     """Expose CUDA DLL folders installed by Python wheels or system toolkit on Windows."""
     dll_dirs_to_add: list[str] = []
 
-    # 1. Check Python wheel nvidia packages (e.g. nvidia-cublas-cu12)
-    for site_package in site.getsitepackages():
-        for library in ("cublas", "cudnn"):
-            lib_path = Path(site_package) / "nvidia" / library / "bin"
-            if lib_path.exists():
-                dll_dirs_to_add.append(str(lib_path))
+    # 1. Check Python wheel nvidia packages (e.g. nvidia-cublas-cu12).
+    # Donmuş (.exe) modda site.getsitepackages() bulunmaz; PyInstaller CUDA
+    # DLL'lerini _internal'a koyar ve yolu kendi ekler, bu yüzden atlanır.
+    if not getattr(sys, "frozen", False):
+        try:
+            site_packages = site.getsitepackages()
+        except AttributeError:
+            site_packages = []
+        for site_package in site_packages:
+            for library in ("cublas", "cudnn"):
+                lib_path = Path(site_package) / "nvidia" / library / "bin"
+                if lib_path.exists():
+                    dll_dirs_to_add.append(str(lib_path))
 
-    # 2. Check project-local CUDA compatibility shims (cuda_compat/)
+    # 2. Check project-local CUDA compatibility shims (cuda_compat/).
+    # Donmuş modda exe'nin yanında; kaynakta repo kökünde.
     compat_path = PROJECT_ROOT / "cuda_compat"
     if compat_path.exists():
         dll_dirs_to_add.append(str(compat_path))
