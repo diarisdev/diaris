@@ -31,6 +31,8 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+# ...ama bizim paketleme spec'imiz COMMIT'lenir (elle bakımlı, üretilmiyor).
+!Audio-process.spec
 
 # Installer logs
 pip-log.txt
@@ -182,5 +184,7 @@ output/results.csv
 # içini "!" ile geri alamaz.
 /docs/*
 !/docs/assets/
+# Elle bakımlı dokümanlar commit'lenir (üretilen/geçici içerik değil).
+!/docs/*.md
 
 cuda_compat/
