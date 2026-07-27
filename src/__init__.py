@@ -1,4 +1,4 @@
-"""Audio-process package."""
+"""Diaris package."""
 
 __all__ = ["run"]
 

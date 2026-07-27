@@ -20,7 +20,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         
-        self.setWindowTitle("ÇOKLU KONUŞMACI GERÇEK ZAMANLI YAPAY ZEKÂ ÇEVİRİ SİSTEMİ")
+        self.setWindowTitle("Diaris")
         self.setWindowIcon(app_icon())
         self.resize(800, 850)
         self.setMinimumSize(720, 800)
@@ -45,7 +45,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Dil Eyaleti ve Çeviriler
         self.TRANSLATIONS = {
             "tr": {
-                "title": "Audio Process AI",
+                "title": "Diaris",
                 "subtitle": "Canlı transkripsiyon ve altyazı kontrol paneli",
                 "theme_light": "Aydınlık",
                 "theme_dark": "Karanlık",
@@ -85,7 +85,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "live_prefix": "[Canlı] "
             },
             "en": {
-                "title": "Audio Process AI",
+                "title": "Diaris",
                 "subtitle": "Live transcription and subtitle control panel",
                 "theme_light": "Light",
                 "theme_dark": "Dark",
@@ -181,7 +181,7 @@ class MainWindow(QtWidgets.QMainWindow):
         title_layout.setContentsMargins(0, 0, 0, 0)
         title_layout.setSpacing(3)
 
-        self.app_title = QtWidgets.QLabel("Audio Process AI", title_box)
+        self.app_title = QtWidgets.QLabel("Diaris", title_box)
         self.app_title.setObjectName("AppTitle")
         self.app_subtitle = QtWidgets.QLabel("Canlı transkripsiyon ve altyazı kontrol paneli", title_box)
         self.app_subtitle.setObjectName("MutedLabel")
@@ -1065,7 +1065,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # Kullanıcıya tepside bilgilendirme mesajı göster
         self.tray.tray.showMessage(
-            "Audio Process AI",
+            "Diaris",
             self.TRANSLATIONS[self.ui_lang]["tray_recording_message"],
             QtWidgets.QSystemTrayIcon.MessageIcon.Information,
             3000
@@ -1167,7 +1167,7 @@ class MainWindow(QtWidgets.QMainWindow):
         event.ignore()
         self.hide()
         self.tray.tray.showMessage(
-            "Audio Process AI",
+            "Diaris",
             self.TRANSLATIONS[self.ui_lang]["tray_bg_message"],
             QtWidgets.QSystemTrayIcon.MessageIcon.Information,
             3000

@@ -1,4 +1,4 @@
-# Packaging Audio-process into a Windows `.exe`
+# Packaging Diaris into a Windows `.exe`
 
 This builds a standalone, double-clickable app with **PyInstaller (onedir)**, wrapped
 in an optional **Inno Setup** installer. It assumes the Silero-ONNX work is done (no
@@ -46,7 +46,7 @@ python scripts/build_app.py --debug
 python scripts/build_app.py
 ```
 
-Output: `dist/AudioProcess/` — `AudioProcess.exe` + an `_internal/` folder.
+Output: `dist/Diaris/` — `Diaris.exe` + an `_internal/` folder.
 
 The helper also drops `.env` (or `.env.example` as a template) next to the exe and
 creates an empty `models/`. Add `--with-models` to copy `models/` in for a fully
@@ -62,7 +62,7 @@ still fail at runtime with `ModuleNotFoundError: No module named 'X'`.
 
 **The loop:**
 1. Run the `--debug` build, reproduce the crash, read the missing module name.
-2. Add it to `hiddenimports` in [`Audio-process.spec`](../Audio-process.spec) (or add
+2. Add it to `hiddenimports` in [`Diaris.spec`](../Diaris.spec) (or add
    the package to the `_COLLECT_ALL` list).
 3. Rebuild. Repeat until it launches.
 
@@ -104,29 +104,29 @@ missing assets (a natural follow-up; not required for a working build).
 
 ## 6. Installer (Inno Setup)
 
-Wrap `dist/AudioProcess/` in an installer for Start-menu shortcut + install location.
+Wrap `dist/Diaris/` in an installer for Start-menu shortcut + install location.
 Skeleton (`installer.iss`):
 
 ```ini
 [Setup]
-AppName=Audio Process
+AppName=Diaris
 AppVersion=1.0
-DefaultDirName={autopf}\AudioProcess
-DefaultGroupName=Audio Process
-OutputBaseFilename=AudioProcess-Setup
+DefaultDirName={autopf}\Diaris
+DefaultGroupName=Diaris
+OutputBaseFilename=Diaris-Setup
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64
 
 [Files]
-Source: "dist\AudioProcess\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
+Source: "dist\Diaris\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Audio Process"; Filename: "{app}\AudioProcess.exe"
-Name: "{autodesktop}\Audio Process"; Filename: "{app}\AudioProcess.exe"
+Name: "{group}\Diaris"; Filename: "{app}\Diaris.exe"
+Name: "{autodesktop}\Diaris"; Filename: "{app}\Diaris.exe"
 
 [Run]
-Filename: "{app}\AudioProcess.exe"; Description: "Launch Audio Process"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Diaris.exe"; Description: "Launch Diaris"; Flags: nowait postinstall skipifsilent
 ```
 
 Build it with the Inno Setup Compiler (GUI or `ISCC.exe installer.iss`).
@@ -150,5 +150,5 @@ Build it with the Inno Setup Compiler (GUI or `ISCC.exe installer.iss`).
 - `configure_cuda_dll_paths()` — skips `site.getsitepackages()` when frozen (PyInstaller
   handles CUDA DLLs), avoiding an `AttributeError`.
 - Silero loads from `models/silero_vad.onnx` — no network at runtime.
-- [`Audio-process.spec`](../Audio-process.spec) — committed, onedir, console toggled by
+- [`Diaris.spec`](../Diaris.spec) — committed, onedir, console toggled by
   `AP_BUILD_CONSOLE`.

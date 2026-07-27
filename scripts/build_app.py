@@ -1,4 +1,4 @@
-"""Audio-process .exe paketleme yardımcısı (PyInstaller onedir).
+"""Diaris .exe paketleme yardımcısı (PyInstaller onedir).
 
 Bu script PyInstaller'ı çağırır ve build SONRASI kurulumu tamamlar: modelleri
 ve .env'i exe'nin yanına yerleştirir (donmuş modda config bunları orada arar).
@@ -27,13 +27,13 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DIST_APP = ROOT / "dist" / "AudioProcess"
+DIST_APP = ROOT / "dist" / "Diaris"
 
 
 def _run_pyinstaller(debug: bool, clean: bool) -> int:
     env = dict(os.environ)
     env["AP_BUILD_CONSOLE"] = "1" if debug else "0"
-    cmd = [sys.executable, "-m", "PyInstaller", "Audio-process.spec", "--noconfirm"]
+    cmd = [sys.executable, "-m", "PyInstaller", "Diaris.spec", "--noconfirm"]
     if clean:
         cmd.append("--clean")
     print(f">>> {'DEBUG (konsollu)' if debug else 'GUI'} build başlıyor...")
@@ -75,7 +75,7 @@ def _place_runtime_assets(with_models: bool) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Audio-process .exe paketle.")
+    ap = argparse.ArgumentParser(description="Diaris .exe paketle.")
     ap.add_argument("--debug", action="store_true",
                     help="Konsollu build (açılış hatalarını görmek için).")
     ap.add_argument("--with-models", action="store_true",
@@ -84,8 +84,8 @@ def main() -> None:
                     help="Build öncesi build/ ve dist/ temizle.")
     args = ap.parse_args()
 
-    if not (ROOT / "Audio-process.spec").exists():
-        raise SystemExit("Audio-process.spec bulunamadı — proje kökünden çalıştırın.")
+    if not (ROOT / "Diaris.spec").exists():
+        raise SystemExit("Diaris.spec bulunamadı — proje kökünden çalıştırın.")
 
     rc = _run_pyinstaller(args.debug, args.clean)
     if rc != 0:
@@ -96,7 +96,7 @@ def main() -> None:
     print("\n" + "=" * 68)
     print(f"Build tamam: {DIST_APP}")
     print("Çalıştırmak için:")
-    print(f'   "{DIST_APP / "AudioProcess.exe"}"')
+    print(f'   "{DIST_APP / "Diaris.exe"}"')
     print("\nÖnce şunları doğrulayın:")
     print("  1. models/ dolu (whisper, pyannote, nllb, silero_vad.onnx)")
     print("  2. .env mevcut (ve dağıtım için HF_TOKEN temiz)")

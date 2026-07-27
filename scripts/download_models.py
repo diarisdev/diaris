@@ -1,4 +1,4 @@
-"""Download local model assets used by Audio-process."""
+"""Download local model assets used by Diaris."""
 
 from __future__ import annotations
 

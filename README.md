@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/banner.svg" alt="Audio Process" width="100%"/>
+<img src="docs/assets/banner.svg" alt="Diaris" width="100%"/>
 
 <br/>
 
@@ -38,7 +38,7 @@ figures out **who is speaking** with pyannote + a custom streaming speaker track
 
 ## Why this exists
 
-Meeting recorders listen to your microphone. **Audio Process listens to your computer.**
+Meeting recorders listen to your microphone. **Diaris listens to your computer.**
 It taps the system's audio output directly — no virtual cables, no acoustic loss — so any
 YouTube video, livestream, podcast, lecture, or video call becomes a live, colour-coded,
 per-speaker transcript, optionally translated into your language in real time. Everything
@@ -106,8 +106,8 @@ Three details do a lot of heavy lifting for accuracy:
 ### Install
 
 ```bash
-git clone https://github.com/YusufBalmumcu/Audio-process.git
-cd Audio-process
+git clone https://github.com/diarisdev/diaris.git
+cd diaris
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt -c constraints-windows.txt
@@ -227,7 +227,7 @@ numbers fairly.
 ## Project layout
 
 ```
-Audio-process/
+diaris/
 ├── main.py                     # entry point (GUI / --cli)
 ├── src/
 │   ├── config.py               # all settings (.env-driven, frozen dataclass)

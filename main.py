@@ -1,5 +1,5 @@
 """
-Audio-process: Canlı Ses Transkripsiyon ve Konuşmacı Ayrıştırma Sistemi
+Diaris: Canlı Ses Transkripsiyon, Konuşmacı Ayrıştırma ve Çeviri Sistemi
 
 Bu dosya uygulamanın giriş noktasıdır.
 Kullanım: python main.py, py main.py --cli(eğer GUI istemezseniz, terminalden çalışır)

@@ -1,0 +1,27 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Diaris logo">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#141d2e"/>
+      <stop offset="55%" stop-color="#10192e"/>
+      <stop offset="100%" stop-color="#0f3460"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- app-icon rounded square -->
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <rect width="512" height="512" rx="112" fill="url(#glow)"/>
+
+  <!-- Waveform bars. Colour GROUPS = different speakers (the product's actual
+       speaker palette): blue, green, purple. -->
+  <g>
+    <rect x="94"  y="201" width="44" height="110" rx="22" fill="#3498db"/>
+    <rect x="164" y="151" width="44" height="210" rx="22" fill="#3498db"/>
+    <rect x="234" y="106" width="44" height="300" rx="22" fill="#2ecc71"/>
+    <rect x="304" y="161" width="44" height="190" rx="22" fill="#9b59b6"/>
+    <rect x="374" y="196" width="44" height="120" rx="22" fill="#9b59b6"/>
+  </g>
+</svg>

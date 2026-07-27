@@ -9,7 +9,7 @@ def _set_windows_app_id():
     açık bir AppUserModelID ata. Windows dışında / başarısızsa sessizce atlar."""
     try:
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AudioProcess.AI.CeviriSistemi")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Diaris.App")
     except Exception:
         pass
 

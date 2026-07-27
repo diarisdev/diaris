@@ -1,14 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec — Audio-process (onedir).
+"""PyInstaller spec — Diaris (onedir).
 
 CPU/GPU AYRIMI: bu spec her iki varyant için AYNIDIR. Fark yalnızca build
 ortamındaki torch tekerleğidir (CPU torch vs CUDA torch). İki temiz venv'den
 aynı spec'i çalıştırmak iki varyantı üretir — spec çatallanmaz.
 
 Çalıştırma (proje kökünden, hedef torch'un kurulu olduğu venv'de):
-    pyinstaller Audio-process.spec --noconfirm
+    pyinstaller Diaris.spec --noconfirm
 
-Çıktı: dist/AudioProcess/  (onedir — exe + _internal/). ASLA onefile değil:
+Çıktı: dist/Diaris/  (onedir — exe + _internal/). ASLA onefile değil:
 onefile her açılışta GB'larca bundle'ı temp'e açar; onedir anında başlar.
 
 NEDEN onedir + harici modeller:
@@ -159,7 +159,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,          # onedir: binariler COLLECT'e bırakılır
-    name="AudioProcess",
+    name="Diaris",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -169,7 +169,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon="src/ui/assets/icon.png",
+    icon="src/ui/assets/icon.ico",
 )
 
 coll = COLLECT(
@@ -180,5 +180,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="AudioProcess",
+    name="Diaris",
 )

@@ -1,7 +1,7 @@
 """
 CHiME6 Dataset Evaluation and Benchmarking Tool.
 
-This script runs the audio-process system on CHiME6 sessions, comparing outputs
+This script runs the Diaris system on CHiME6 sessions, comparing outputs
 with ground-truth transcripts to calculate key conversational speech metrics:
   - WER (Word Error Rate) & CER (Character Error Rate)
   - DER (Diarization Error Rate) using pyannote.metrics

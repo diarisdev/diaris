@@ -1,4 +1,4 @@
-<svg width="1200" height="280" viewBox="0 0 1200 280" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Audio Process banner">
+<svg width="1200" height="280" viewBox="0 0 1200 280" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Diaris banner">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#0b0f1a"/>
@@ -50,9 +50,9 @@
 
   <!-- title -->
   <g font-family="Segoe UI, Arial, sans-serif">
-    <text x="72" y="128" font-size="58" font-weight="700" fill="#f2f6fb" letter-spacing="0.5">Audio Process</text>
-    <rect x="74" y="148" width="360" height="5" rx="2.5" fill="url(#accent)"/>
-    <text x="72" y="192" font-size="21" fill="#aebfd6">Real-time system-audio transcription, speaker diarization</text>
-    <text x="72" y="222" font-size="21" fill="#aebfd6">and live translation — on your own machine.</text>
+    <text x="72" y="128" font-size="66" font-weight="700" fill="#f2f6fb" letter-spacing="1">Diaris</text>
+    <rect x="74" y="150" width="230" height="5" rx="2.5" fill="url(#accent)"/>
+    <text x="72" y="194" font-size="21" fill="#aebfd6">Live, speaker-labeled, translated subtitles</text>
+    <text x="72" y="224" font-size="21" fill="#aebfd6">for anything your PC plays — fully on-device.</text>
   </g>
 </svg>
