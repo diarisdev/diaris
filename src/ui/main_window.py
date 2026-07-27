@@ -15,6 +15,8 @@ class PipelineSignals(QtCore.QObject):
     status_changed = QtCore.Signal(str)
     transcription_received = QtCore.Signal(dict)
     speaker_updated = QtCore.Signal(dict)
+    # Oturum-sonu konuşmacı düzeltmesi (yalnızca değişen satırlar).
+    transcript_refined = QtCore.Signal(dict)
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -30,6 +32,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.signals.status_changed.connect(self.safe_on_status_change)
         self.signals.transcription_received.connect(self.safe_on_transcription)
         self.signals.speaker_updated.connect(self.safe_on_speaker_update)
+        self.signals.transcript_refined.connect(self.safe_on_transcript_refined)
         
         # Eyaletler
         self.overlay_visible = True
@@ -82,7 +85,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "lang_nl": "Hollandaca",
                 "lang_pt": "Portekizce",
                 "analyzing": "Çözümleniyor...",
-                "live_prefix": "[Canlı] "
+                "live_prefix": "[Canlı] ",
+                "tray_refined_message": "Oturum sonu düzeltmesi: {n} segmentin konuşmacı etiketi güncellendi."
             },
             "en": {
                 "title": "Diaris",
@@ -122,7 +126,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "lang_nl": "Dutch",
                 "lang_pt": "Portuguese",
                 "analyzing": "Resolving...",
-                "live_prefix": "[Live] "
+                "live_prefix": "[Live] ",
+                "tray_refined_message": "End-of-session refinement: speaker labels updated on {n} segment(s)."
             }
         }
         
@@ -1007,6 +1012,34 @@ class MainWindow(QtWidgets.QMainWindow):
             self.diarized_indices.add(segment_index)
             self._refresh_views("")
 
+    def safe_on_transcript_refined(self, event):
+        """Oturum-sonu konuşmacı düzeltmesi — pipeline kapanırken bir kez gelir.
+
+        Canlı takip verdiği bir konuşmacı kararını geri alamaz; bu güncelleme
+        oturumun TAMAMINA bakan refinement katmanının sonucudur ve yalnızca
+        etiketi değişen log satırlarını taşır. Durum etiketi kapanış mesajlarıyla
+        (Hazır./Durduruldu.) hemen üzerine yazılacağı için bildirim tepsiden
+        verilir; asıl geri bildirim log'un kendisinin düzelmesidir.
+        """
+        updates = event.get("updates") or {}
+        changed = False
+        for segment_index, text in updates.items():
+            if 0 <= segment_index < len(self.finalized_segments):
+                self.finalized_segments[segment_index] = text
+                changed = True
+
+        if not changed:
+            return
+
+        self._refresh_views("")
+        total = (event.get("stats") or {}).get("total", 0)
+        self.tray.tray.showMessage(
+            "Diaris",
+            self.TRANSLATIONS[self.ui_lang]["tray_refined_message"].format(n=total),
+            QtWidgets.QSystemTrayIcon.MessageIcon.Information,
+            4000,
+        )
+
     # ------------------------------------------------------------------ #
     #  Kayıt Kontrolleri                                                  #
     # ------------------------------------------------------------------ #
@@ -1036,7 +1069,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.signals.transcription_received.emit(event)
         def speaker_cb(event):
             self.signals.speaker_updated.emit(event)
-            
+        def refined_cb(event):
+            self.signals.transcript_refined.emit(event)
+
         def get_lang_pair():
             source_lang = self.source_lang_combo.currentData() or "en"
             target_lang = self.target_lang_combo.currentData() or "tr"
@@ -1049,6 +1084,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "on_status_change": status_cb,
                 "on_transcription": trans_cb,
                 "on_speaker_update": speaker_cb,
+                "on_transcript_refined": refined_cb,
                 "device_index": device_idx,
                 "get_lang_pair": get_lang_pair,
             },

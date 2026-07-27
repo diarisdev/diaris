@@ -36,6 +36,7 @@ from .config import (
 )
 from .core.ai_worker import AIWorker
 from .core.formatting import format_results
+from .core.session_transcript import SessionTranscript
 from .translation import CachingTranslationEngine, get_translation_engine
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,8 @@ def _submit_partial_translation(executor, engine, on_transcription, text,
     executor.submit(job)
 
 
-def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None, translation_engine=None):
+def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None, translation_engine=None,
+                      session_transcript=None):
     """Process queued diarization tasks in the background."""
     while True:
         task = diarization_queue.get()
@@ -190,6 +192,13 @@ def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None, tran
                 )
                 for r, t in zip(results, translated):
                     r["text"] = t
+
+            # Oturum geçmişi: konuşmacı etiketleri KALICI olarak verildi, ama
+            # oturum sonunda tüm zaman çizelgesine bakan refinement bir kısmını
+            # düzeltebilir. Segmentleri burada biriktiriyoruz (yayınlanan metnin
+            # aynısı — çeviri sonrası).
+            if session_transcript is not None:
+                session_transcript.add_chunk(segment_index, results)
 
             # Format and send update
             formatted_str = format_results(results, return_str=True)
@@ -497,7 +506,50 @@ def _save_recording(frames, channels, rate, sample_width, on_status_change=None)
     _emit_status(f"Dosya kaydedildi: {os.path.abspath(OUTPUT_FILENAME)}", on_status_change)
 
 
-def run(stop_event=None, on_status_change=None, on_transcription=None, on_speaker_update=None, allow_interactive_device=False, device_index=None, get_lang_pair=None):
+def _apply_session_refinement(session_transcript, on_transcript_refined=None) -> None:
+    """Oturum sonunda konuşmacı etiketlerini son bir kez düzeltir.
+
+    Canlı takip erken verdiği bir kararı geri alamaz; refinement yalnızca
+    "tamamlanmış görüntüde" görülebilen hataları (hayalet profiller, tek seferlik
+    adalar, kısa Unknown boşlukları) düzeltir. Muhafazakârdır: şüphede olan
+    segmente dokunmaz, dolayısıyla çoğu kısa oturumda güvenli bir no-op'tur.
+
+    Hata ölümcül değildir — düzeltme yapılamazsa canlı etiketler olduğu gibi kalır.
+    """
+    if session_transcript is None:
+        return
+    try:
+        updates, stats = session_transcript.refine()
+    except Exception:
+        logger.exception("Session speaker refinement failed")
+        return
+
+    if not updates:
+        return
+
+    logger.info(
+        "Session refinement relabelled %d segment(s) across %d transcript line(s)",
+        stats.get("total", 0), len(updates),
+    )
+
+    if on_transcript_refined:
+        on_transcript_refined({"updates": updates, "stats": stats})
+        return
+
+    # CLI: düzeltilen satırları yeniden bas (canlı akışta yanlış etiketle
+    # görülmüşlerdi).
+    print(
+        f"\n[Oturum sonu düzeltme] {stats.get('total', 0)} segment yeniden etiketlendi "
+        f"(small_island={stats.get('small_island_merge', 0)}, "
+        f"tiny_frag={stats.get('tiny_fragmented_merge', 0)}, "
+        f"unknown_fill={stats.get('unknown_fill', 0)}):"
+    )
+    for index in sorted(updates):
+        print(f"\nSegment {index}:\n{updates[index]}")
+    print()
+
+
+def run(stop_event=None, on_status_change=None, on_transcription=None, on_speaker_update=None, allow_interactive_device=False, device_index=None, get_lang_pair=None, on_transcript_refined=None):
     """
     Run the live recording and transcription loop.
 
@@ -508,6 +560,11 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
         device_index: Specific PyAudio device index to use. When provided,
                       auto-detection is skipped entirely.
         get_lang_pair: A callable returning (source_lang, target_lang) dynamically.
+        on_transcript_refined: Called ONCE at shutdown with
+                      {"updates": {segment_index: text}, "stats": {...}} when the
+                      session-end speaker refinement changed any label. Only
+                      changed lines are reported. Omit it (CLI) to have the
+                      corrected lines printed instead.
     """
     p = pyaudio.PyAudio()
     stream = None
@@ -516,6 +573,8 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
     ai_thread = None
     diarization_thread = None
     translation_executor = None
+    # Oturum boyu konuşmacı segmentleri — kapanışta refinement'a girer.
+    session_transcript = SessionTranscript()
     state = RecordingState()
     channels = None
     rate = None
@@ -595,7 +654,8 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
 
         diarization_thread = threading.Thread(
             target=_diarization_loop,
-            args=(diarization_queue, ai_worker, on_speaker_update, translation_engine),
+            args=(diarization_queue, ai_worker, on_speaker_update, translation_engine,
+                  session_transcript),
             daemon=True,
         )
         diarization_thread.start()
@@ -682,6 +742,10 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
             diarization_thread.join(timeout=30)
             if diarization_thread.is_alive():
                 logger.warning("Diarization worker did not shut down within 30s")
+
+        # Diarization thread'i bittikten SONRA: tüm oturum elimizde, refinement
+        # zaman çizelgesinin tamamına bakabilir.
+        _apply_session_refinement(session_transcript, on_transcript_refined)
 
         if translation_executor is not None:
             translation_executor.shutdown(wait=False)

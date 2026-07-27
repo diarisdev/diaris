@@ -30,6 +30,22 @@ ROOT = Path(__file__).resolve().parents[1]
 DIST_APP = ROOT / "dist" / "Diaris"
 
 
+def _wipe_build_dirs() -> None:
+    """build/ ve dist/ dizinlerini tamamen siler.
+
+    PyInstaller'ın kendi `--clean`'i yalnızca cache + ara dosyaları temizler;
+    dist/ İÇİNDEKİ eski çıktıya DOKUNMAZ ve `--noconfirm` yalnızca bu build'in
+    ürettiği klasörü üzerine yazar. Sonuç: adı değişen (Audio-process -> Diaris)
+    ya da artık üretilmeyen eski build'ler dist/ altında kalıcı olarak durur ve
+    GB'larca yer kaplar. Gerçekten temiz bir çıktı için dizinleri burada siliyoruz.
+    """
+    for name in ("build", "dist"):
+        path = ROOT / name
+        if path.is_dir():
+            print(f"   siliniyor: {path}")
+            shutil.rmtree(path, ignore_errors=True)
+
+
 def _run_pyinstaller(debug: bool, clean: bool) -> int:
     env = dict(os.environ)
     env["AP_BUILD_CONSOLE"] = "1" if debug else "0"
@@ -81,11 +97,16 @@ def main() -> None:
     ap.add_argument("--with-models", action="store_true",
                     help="models/ dizinini de dist'e kopyala (offline installer).")
     ap.add_argument("--clean", action="store_true",
-                    help="Build öncesi build/ ve dist/ temizle.")
+                    help="Build öncesi build/ ve dist/ dizinlerini TAMAMEN sil "
+                         "(eski/adı değişmiş build artıkları kalmasın).")
     args = ap.parse_args()
 
     if not (ROOT / "Diaris.spec").exists():
         raise SystemExit("Diaris.spec bulunamadı — proje kökünden çalıştırın.")
+
+    if args.clean:
+        print(">>> Temizlik: build/ ve dist/ siliniyor...")
+        _wipe_build_dirs()
 
     rc = _run_pyinstaller(args.debug, args.clean)
     if rc != 0:
