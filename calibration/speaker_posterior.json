@@ -1,0 +1,41 @@
+{
+  "theta": 0.55,
+  "temperature": 0.09,
+  "meetings": [
+    "ES2004a",
+    "IS1009a",
+    "TS3003a"
+  ],
+  "pair_count": 5562,
+  "holdout": [
+    {
+      "meeting": "ES2004a",
+      "theta": 0.56,
+      "temperature": 0.09
+    },
+    {
+      "meeting": "IS1009a",
+      "theta": 0.54,
+      "temperature": 0.08
+    },
+    {
+      "meeting": "TS3003a",
+      "theta": 0.55,
+      "temperature": 0.11
+    }
+  ],
+  "suggested_cutpoints": {
+    "error<=10%": {
+      "p_best": 0.27,
+      "coverage": 0.642
+    },
+    "error<=5%": {
+      "p_best": 0.459,
+      "coverage": 0.487
+    },
+    "error<=2%": {
+      "p_best": 0.986,
+      "coverage": 0.001
+    }
+  }
+}

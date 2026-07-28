@@ -37,7 +37,9 @@ from ..config import (
     WHISPER_NO_SPEECH_THRESHOLD, WHISPER_LOGPROB_THRESHOLD,
     WHISPER_COMPRESSION_RATIO_THRESHOLD,
     DIARIZATION_WARMUP_MS,
+    DIARIZATION_POSTERIOR, POSTERIOR_CALIBRATION_PATH, POSTERIOR_NEW_SPEAKER,
 )
+from .speaker_posterior import load_settings as load_posterior_settings
 from ..audio.utils import calculate_chunk_duration_ms
 from ..audio.preprocessing import (
     to_mono_float32, resample_to_16k, apply_bandpass_filter,
@@ -116,6 +118,29 @@ def is_whisper_hallucination(segment) -> bool:
     return False
 
 
+def load_posterior_settings_or_none():
+    """Canlı yol için kalibre posterior ayarlarını yükler.
+
+    Kapalıysa ya da kalibrasyon dosyası yoksa None döner ve tracker ESKİ eşik
+    yoluna düşer — uygulama her durumda çalışır, sadece karar kuralı değişir.
+
+    NOT: kalibrasyon (θ=0.55, T=0.09) AMI EVAL yolunda ölçüldü. Canlı yol
+    warm-up'ta singleton filtresi uyguluyor ve eşiği 0.66; θ embedding modelinin
+    skor dağılımının özelliği olduğu için taşınması bekleniyor, ama canlı yolda
+    ayrıca doğrulanmadı. DIARIZATION_POSTERIOR=false ile anında kapatılabilir.
+    """
+    if not DIARIZATION_POSTERIOR:
+        return None
+    settings = load_posterior_settings(POSTERIOR_CALIBRATION_PATH,
+                                       new_speaker=POSTERIOR_NEW_SPEAKER)
+    if settings is None:
+        logger.warning(
+            "Posterior açık ama kalibrasyon okunamadı (%s) — eşik yoluna dönülüyor.",
+            POSTERIOR_CALIBRATION_PATH,
+        )
+    return settings
+
+
 def _trim_transcribed_prefix(results: list, trim_prefix_s: float) -> list:
     """Overlap taşımasıyla gelen, ZATEN transkribe edilmiş öneki kırpar.
 
@@ -164,7 +189,7 @@ class AIWorker:
         self.silero_vad = None  # Speech-only embedding için
         self.vad_utils = None
         self._loaded = False
-        self.speaker_tracker = SpeakerTracker()
+        self.speaker_tracker = SpeakerTracker(posterior=load_posterior_settings_or_none())
         self._runtime_config_path = None  # Geçici config dosyası yolu
 
     def _prepare_runtime_config(self, config_path):
@@ -465,6 +490,28 @@ class AIWorker:
             traceback.print_exc()
             return None
 
+    def _attach_turn_spans_to_trace(self, turns):
+        """Karar izindeki her probe'a ait turn aralıklarını (chunk-göreli) ekler.
+
+        Teşhis penceresinde ve offline analizde kararı referansla eşleştirebilmek
+        için gerekli: tracker yalnızca embedding görür, o embedding'in sesin
+        HANGİ aralığından geldiğini bilmez.
+        """
+        tracker = self.speaker_tracker
+        if not getattr(tracker, "debug_enabled", False):
+            return
+        trace = getattr(tracker, "last_trace", None)
+        if not trace:
+            return
+
+        spans = {}
+        for turn in turns:
+            spans.setdefault(turn["speaker"], []).append(
+                [float(turn["start"]), float(turn["end"])]
+            )
+        for probe in trace.get("probes", []):
+            probe["turns"] = spans.get(probe["local_label"], [])
+
     def run_diarization(self, waveform_16k, sample_rate, chunk_duration_ms, transcribed_segments):
         """
         Finalleşmiş bir ses parçası üzerinde pyannote diarization, konuşmacı eşleme
@@ -509,6 +556,12 @@ class AIWorker:
                 # Aktif faz: embedding-based konuşmacı eşleme
                 if turns and embeddings_dict:
                     speaker_mapping = self.speaker_tracker.map_speakers(embeddings_dict, quality_dict)
+                    # Teşhis izine turn zaman aralıklarını iliştir. Tracker turn'leri
+                    # görmez (yalnızca embedding alır); referansla eşleştirip "bu
+                    # karar doğru muydu" sorusunu cevaplayabilmek için zaman
+                    # bilgisi burada eklenmeli. Turn'ler AŞAĞIDA yerinde yeniden
+                    # etiketlendiği için span'lar ÖNCE toplanır.
+                    self._attach_turn_spans_to_trace(turns)
                     for t in turns:
                         if t["speaker"] not in speaker_mapping:
                             speaker_mapping[t["speaker"]] = "Unknown"

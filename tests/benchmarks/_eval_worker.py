@@ -107,11 +107,14 @@ class EvalAIWorker(AIWorker):
     ai_worker.py'ye (canlı/YouTube yolu) dokunmaz.
     """
 
-    def __init__(self, rate=None, channels=None, embedding_threshold=None):
+    def __init__(self, rate=None, channels=None, embedding_threshold=None,
+                 cohort_norm=None, posterior=None):
         super().__init__(rate=rate, channels=channels)
-        # Tracker'ı eval varyantıyla değiştir. embedding_threshold None ise
+        # Tracker'ı eval varyantıyla değiştir. None geçilen parametrelerde
         # config/.env varsayılanı kullanılır; verilirse eval'e özel (canlı etkilenmez).
-        self.speaker_tracker = EvalSpeakerTracker(threshold=embedding_threshold)
+        self.speaker_tracker = EvalSpeakerTracker(threshold=embedding_threshold,
+                                                  cohort_norm=cohort_norm,
+                                                  posterior=posterior)
 
     def _smooth_speaker_labels(self, results):
         """Agresif: < 1s segmenti baskın komşunun konuşmacısına devret.

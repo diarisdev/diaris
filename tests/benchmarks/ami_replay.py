@@ -66,6 +66,7 @@ from src.audio.vad import VADEngine
 from src.core.ai_worker import AIWorker
 from src.core.speaker_refinement import RefinementConfig, refine_speakers
 from src.core.embedding_trace import EmbeddingTraceWriter
+from src.core.speaker_posterior import load_settings as load_posterior_settings
 from tests.benchmarks._eval_worker import EvalAIWorker
 from tests.dataset_managers.ami import resolve_audio_path
 from src.pipeline import RecordingState, _update_recording_state, _flush_chunk_if_ready
@@ -338,6 +339,26 @@ def main() -> None:
     ap.add_argument("--embedding-threshold", type=float, default=0.55,
                     help="Konuşmacı eşleştirme eşiği (eval'e özel; .env/canlı etkilenmez). "
                          "4-toplantı süpürmesinde 0.70 aggregate-optimal bulundu.")
+    ap.add_argument("--cohort-norm", type=float, default=None,
+                    help="Kohort (AS-norm) normalizasyon gücü. 0 = kapalı (ham kosinüs), "
+                         "1.0 = tam düzeltme. Ham benzerlik utterance'lar arası "
+                         "kıyaslanabilir değildir: gürültülü embedding TÜM profillere "
+                         "yakın çıkar. Verilmezse config/.env varsayılanı (0.0). "
+                         "Yalnızca EVAL yolunu etkiler; canlı davranış değişmez.")
+    ap.add_argument("--posterior", action="store_true",
+                    help="Konuşmacı kararını kalibre POSTERIOR ile ver (sert eşik yerine). "
+                         "θ/T calibration/speaker_posterior.json'dan okunur; dosya yoksa "
+                         "sessizce eski yola düşülmez, hata verilir. Yalnızca EVAL yolu.")
+    ap.add_argument("--posterior-calibration", type=Path,
+                    default=PROJECT_ROOT / "calibration" / "speaker_posterior.json",
+                    help="Posterior kalibrasyon dosyası.")
+    ap.add_argument("--new-speaker", type=float, default=None,
+                    help="Posterior: yeni konuşmacı açma kapısı (ham 'hiçbiri değil' "
+                         "kütlesi bu değeri aşmalı). Yüksek = daha az konuşmacı. "
+                         "Kalibrasyondan TÜREMEZ — aşırı/eksik sayım dengesi tercihtir.")
+    ap.add_argument("--competitor-slope", type=float, default=None,
+                    help="Posterior β: profil sayısı arttıkça 'hiçbiri değil' ağırlığı "
+                         "(β·log K). Hayalet konuşmacı üretimini bastırmanın ana knob'u.")
     ap.add_argument("--no-refine", action="store_true",
                     help="Son-işleme (speaker_refinement) katmanını kapat. A/B için: "
                          "açıkken 8-toplantı ölçümünde Conf 10.86->10.19, "
@@ -382,10 +403,30 @@ def main() -> None:
 
     print(f"[Replay] Referans dizini: {args.refs.resolve()}")
     print(f"[Replay] Çıktı dizini: {args.out.resolve()}")
+    posterior = None
+    if args.posterior:
+        posterior = load_posterior_settings(args.posterior_calibration,
+                                            competitor_slope=args.competitor_slope,
+                                            new_speaker=args.new_speaker)
+        if posterior is None:
+            raise SystemExit(
+                f"Posterior kalibrasyonu okunamadı: {args.posterior_calibration}\n"
+                "Önce: python scripts/calibrate_speaker_posterior.py <iz-dizini> "
+                "--out calibration/speaker_posterior.json"
+            )
+        print(f"[Replay] Posterior AÇIK: theta={posterior.config.theta:.2f} "
+              f"T={posterior.config.temperature:.2f} beta={posterior.config.competitor_slope:.2f} "
+              f"| assign={posterior.policy.assign:.3f} learn={posterior.policy.learn:.3f} "
+              f"new={posterior.policy.new_speaker:.2f}")
+
     print(f"[Replay] Modeller yükleniyor... (EvalAIWorker, "
-          f"embedding_threshold={args.embedding_threshold or 'config'})")
+          f"embedding_threshold={args.embedding_threshold or 'config'}, "
+          f"cohort_norm={'config' if args.cohort_norm is None else args.cohort_norm}, "
+          f"posterior={'acik' if posterior else 'kapali'})")
     worker = EvalAIWorker(rate=TARGET_RATE, channels=TARGET_CH,
-                          embedding_threshold=args.embedding_threshold)
+                          embedding_threshold=args.embedding_threshold,
+                          cohort_norm=args.cohort_norm,
+                          posterior=posterior)
     if not worker.load_models():
         raise SystemExit("AIWorker modelleri yüklenemedi.")
     # Eval'e özel VAD hassasiyeti (canlı .env'i etkilemez). AMI mix-headset'te

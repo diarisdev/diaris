@@ -230,6 +230,303 @@ def test_reset_clears_traces():
     assert tracker.last_warmup_trace is None
 
 
+# --------------------------------------------------------------------------- #
+# Kohort (AS-norm) normalizasyonu
+# --------------------------------------------------------------------------- #
+def _cohort_tracker(cohort_norm):
+    from src.core.speaker_tracker import SpeakerTracker
+    tracker = SpeakerTracker(threshold=0.60, warmup_ms=0, cohort_norm=cohort_norm)
+    tracker._warmup_complete = True
+    return tracker
+
+
+def test_cohort_normalization_is_a_no_op_when_disabled():
+    """Varsayılan (0.0) mevcut davranışı BİREBİR korumalı."""
+    tracker = _cohort_tracker(0.0)
+    raw = {"A": 0.80, "B": 0.40, "C": 0.30}
+    assert tracker._cohort_normalize(raw) == raw
+    assert tracker._cohort_reference is None
+
+
+def test_cohort_normalization_needs_enough_profiles():
+    """2 profille 'diğerleri' tek örnek; istatistik anlamsız → dokunma."""
+    tracker = _cohort_tracker(1.0)
+    raw = {"A": 0.80, "B": 0.40}
+    assert tracker._cohort_normalize(raw) == raw
+
+
+def test_first_observation_seeds_the_reference_and_leaves_the_best_untouched():
+    """İlk chunk referansı tohumlar; eşiğin sınadığı EN İYİ skor kaymaz."""
+    tracker = _cohort_tracker(1.0)
+    raw = {"A": 0.80, "B": 0.40, "C": 0.30}
+    out = tracker._cohort_normalize(raw)
+
+    # impostor ortalaması = en iyi (0.80) hariç = (0.40 + 0.30) / 2
+    assert tracker._cohort_reference == pytest.approx(0.35, abs=1e-9)
+    # Referans bu utterance'tan tohumlandığı için en iyi skorun düzeltmesi sıfır.
+    assert out["A"] == pytest.approx(raw["A"], abs=1e-9)
+
+
+def test_margins_are_scaled_by_the_cohort_size():
+    """Belgelenmiş yan etki: margin (1 + alpha/(K-1)) katına çıkar.
+
+    Dönüşüm s_i'de doğrusal olduğu için sıralama korunur ama skorlar arası
+    mesafe genişler — MIN_DECISION_MARGIN kapısı bu ölçekte yeniden okunmalı.
+    """
+    tracker = _cohort_tracker(1.0)
+    tracker._cohort_reference = 0.30
+    raw = {"A": 0.80, "B": 0.40, "C": 0.30}          # K = 3 → beklenen kat 1.5
+
+    out = tracker._cohort_normalize(raw)
+
+    raw_margin = raw["A"] - raw["B"]
+    new_margin = out["A"] - out["B"]
+    assert new_margin == pytest.approx(raw_margin * 1.5, rel=1e-9)
+
+
+def test_noisy_embedding_is_pushed_down():
+    """Her şeye yakın duran (gürültülü) embedding cezalandırılmalı."""
+    tracker = _cohort_tracker(1.0)
+    tracker._cohort_reference = 0.30          # öğrenilmiş normal seviye
+
+    noisy = {"A": 0.72, "B": 0.68, "C": 0.66}  # hepsi yüksek → şüpheli
+    out = tracker._cohort_normalize(noisy)
+
+    assert out["A"] < noisy["A"], "gürültülü embedding aşağı çekilmeliydi"
+
+
+def test_clean_embedding_is_lifted():
+    """Diğer herkesten uzak duran (temiz) embedding ödüllendirilmeli."""
+    tracker = _cohort_tracker(1.0)
+    tracker._cohort_reference = 0.30
+
+    clean = {"A": 0.64, "B": 0.10, "C": 0.05}  # sadece A'ya yakın
+    out = tracker._cohort_normalize(clean)
+
+    assert out["A"] > clean["A"], "temiz embedding yukarı çekilmeliydi"
+
+
+def test_normalization_preserves_ranking():
+    """Dönüşüm monoton: en-yakın-komşu sıralaması ASLA değişmemeli."""
+    tracker = _cohort_tracker(1.0)
+    tracker._cohort_reference = 0.30
+    raw = {"A": 0.81, "B": 0.55, "C": 0.42, "D": 0.20}
+
+    out = tracker._cohort_normalize(raw)
+
+    assert sorted(raw, key=raw.get, reverse=True) == sorted(out, key=out.get, reverse=True)
+
+
+def test_strength_scales_the_correction():
+    """alpha düzeltmenin büyüklüğünü doğrusal ölçeklemeli."""
+    raw = {"A": 0.72, "B": 0.68, "C": 0.66}
+
+    half = _cohort_tracker(0.5)
+    half._cohort_reference = 0.30
+    full = _cohort_tracker(1.0)
+    full._cohort_reference = 0.30
+
+    shift_half = raw["A"] - half._cohort_normalize(raw)["A"]
+    shift_full = raw["A"] - full._cohort_normalize(raw)["A"]
+    assert shift_full == pytest.approx(2 * shift_half, rel=1e-9)
+
+
+def test_reference_tracks_the_impostor_level():
+    """Referans EMA ile gözlenen impostor seviyesine yaklaşmalı."""
+    tracker = _cohort_tracker(1.0)
+    tracker._cohort_reference = 0.30
+
+    for _ in range(200):
+        tracker._cohort_normalize({"A": 0.90, "B": 0.50, "C": 0.50})
+
+    # impostor ortalaması sabit 0.50 → referans oraya yakınsamalı
+    assert tracker._cohort_reference == pytest.approx(0.50, abs=0.01)
+
+
+def test_reset_clears_the_learned_reference():
+    tracker = _cohort_tracker(1.0)
+    tracker._cohort_normalize({"A": 0.8, "B": 0.4, "C": 0.3})
+    assert tracker._cohort_reference is not None
+
+    tracker.reset()
+    assert tracker._cohort_reference is None
+
+
+def test_map_speakers_records_raw_and_normalized_scores():
+    """İz her iki skoru da taşımalı — düzeltmenin etkisi görülebilsin."""
+    torch = pytest.importorskip("torch")
+    tracker = _cohort_tracker(1.0)
+    for vector in ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]):
+        tracker._register_speaker([torch.tensor(vector)])
+    tracker.debug_enabled = True
+
+    tracker.map_speakers({"local": torch.tensor([0.9, 0.3, 0.2])}, {"local": 4.0})
+
+    probe, = tracker.last_trace["probes"]
+    assert set(probe["raw_scores"]) == {"SPEAKER_00", "SPEAKER_01", "SPEAKER_02"}
+    assert set(probe["scores"]) == set(probe["raw_scores"])
+    assert probe["cohort_reference"] is not None
+
+
+# --------------------------------------------------------------------------- #
+# Posterior entegrasyonu
+#
+# En kritik test: posterior KAPALIYKEN karar yolu birebir eskisi gibi olmalı.
+# A/B tek anahtarla yapılabilsin diye kapılar tek yerde toplandı; o refactor
+# mevcut davranışı değiştirmemiş olmalı.
+# --------------------------------------------------------------------------- #
+def _tracker_with_profiles(torch, **kwargs):
+    """3 dik profil, 4 boyutlu uzayda.
+
+    4. boyut bilerek boş: "hiçbir profile benzemeyen" bir ses ancak profillerin
+    germediği bir yönde var olabilir. 3 boyutta 3 dik profille en uzak nokta
+    bile hepsine 0.577 benzer — gerçek bir yabancı temsil edilemez.
+    """
+    from src.core.speaker_tracker import SpeakerTracker
+    tracker = SpeakerTracker(threshold=0.60, warmup_ms=0, **kwargs)
+    tracker._warmup_complete = True
+    for vector in ([1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]):
+        tracker._register_speaker([torch.tensor(vector)])
+    return tracker
+
+
+def _settings(assign=0.45, learn=0.80, new_speaker=0.60, **config_kwargs):
+    from src.core.speaker_posterior import (
+        PosteriorConfig, PosteriorPolicy, PosteriorSettings,
+    )
+    return PosteriorSettings(
+        config=PosteriorConfig(theta=0.55, temperature=0.09, **config_kwargs),
+        policy=PosteriorPolicy(assign=assign, learn=learn, new_speaker=new_speaker),
+    )
+
+
+def test_tracker_defaults_to_the_legacy_decision_path():
+    """posterior=None → eski kapılar, eski karar isimleri."""
+    torch = pytest.importorskip("torch")
+    tracker = _tracker_with_profiles(torch)
+    tracker.debug_enabled = True
+
+    tracker.map_speakers({"local": torch.tensor([0.99, 0.05, 0.0, 0.0])}, {"local": 5.0})
+
+    probe, = tracker.last_trace["probes"]
+    assert probe["decision"] == "matched"
+    assert probe["p_best"] is None          # posterior kapalı → güven yok
+    assert tracker.posterior is None
+
+
+def test_legacy_path_still_sticks_short_utterances():
+    """Kapalıyken kısa/eşleşmeyen ses eskisi gibi 'sticky_short' olmalı."""
+    torch = pytest.importorskip("torch")
+    tracker = _tracker_with_profiles(torch)
+    tracker.debug_enabled = True
+
+    tracker.map_speakers({"local": torch.tensor([0.6, 0.6, 0.5, 0.0])}, {"local": 0.4})
+
+    probe, = tracker.last_trace["probes"]
+    assert probe["decision"] == "sticky_short"
+
+
+def test_posterior_path_records_confidence():
+    torch = pytest.importorskip("torch")
+    tracker = _tracker_with_profiles(torch, posterior=_settings())
+    tracker.debug_enabled = True
+
+    tracker.map_speakers({"local": torch.tensor([0.99, 0.05, 0.0, 0.0])}, {"local": 5.0})
+
+    probe, = tracker.last_trace["probes"]
+    assert probe["decision"] == "matched"
+    assert 0.0 <= probe["p_best"] <= 1.0
+    assert probe["p_unknown"] is not None
+
+
+def test_posterior_does_not_credit_speech_to_low_confidence_matches():
+    """ÖLÇÜLEN SORUN: düşük güvenli atamanın süresi yanlış profili besliyordu.
+
+    Posterior yolunda etiket yine verilir (ekranda bir şey görünmeli) ama
+    profilin olgunluk hanesine yazılmaz.
+    """
+    torch = pytest.importorskip("torch")
+    legacy = _tracker_with_profiles(torch)
+    modern = _tracker_with_profiles(torch, posterior=_settings(assign=0.99))
+
+    ambiguous = torch.tensor([0.60, 0.58, 0.0, 0.0])
+    # Profiller kayıt anında tohum olgunluk kredisi alır; taban sıfır değil,
+    # bu yüzden FARKA bakıyoruz.
+    legacy_before = sum(legacy._speech_seconds.values())
+    modern_before = sum(modern._speech_seconds.values())
+
+    legacy.map_speakers({"local": ambiguous}, {"local": 0.4})
+    modern.map_speakers({"local": ambiguous}, {"local": 0.4})
+
+    assert sum(legacy._speech_seconds.values()) > legacy_before   # eski: yazıyor
+    assert sum(modern._speech_seconds.values()) == modern_before  # yeni: yazmıyor
+
+
+def test_posterior_still_labels_low_confidence_utterances():
+    """Etiket kaybolmamalı — yalnızca öğrenme durur (DER riski yok)."""
+    torch = pytest.importorskip("torch")
+    tracker = _tracker_with_profiles(torch, posterior=_settings(assign=0.99))
+    tracker.debug_enabled = True
+
+    mapping = tracker.map_speakers({"local": torch.tensor([0.60, 0.58, 0.0, 0.0])},
+                                   {"local": 0.4})
+
+    assert mapping["local"] in tracker.known_speakers
+    probe, = tracker.last_trace["probes"]
+    assert probe["decision"] == "low_confidence"
+
+
+def test_new_speaker_gate_controls_candidate_creation():
+    """Hayalet konuşmacı kapısı: yalnızca ham "hiçbiri değil" kanitı yeterliyse açılır."""
+    torch = pytest.importorskip("torch")
+    stranger = torch.tensor([0.0, 0.0, 0.0, 1.0])   # hiçbir profile benzemiyor
+    familiar = torch.tensor([0.95, 0.10, 0.0, 0.0])  # SPEAKER_00'a çok benziyor
+
+    opens = _tracker_with_profiles(torch, posterior=_settings(new_speaker=0.60))
+    opens.map_speakers({"local": stranger}, {"local": 5.0})
+    assert len(opens._candidates) == 1, "gerçek yabancı için aday açılmalıydı"
+
+    # Tanıdık ses aday açmamalı (zaten güvenle eşleşiyor).
+    quiet = _tracker_with_profiles(torch, posterior=_settings(new_speaker=0.60))
+    quiet.map_speakers({"local": familiar}, {"local": 5.0})
+    assert len(quiet._candidates) == 0
+
+
+def test_competitor_penalty_does_not_leak_into_speaker_creation():
+    """TASARIM DÜZELTMESİ: β yeni konuşmacı açmayı KOLAYLAŞTIRMAMALI.
+
+    β·log(K) "hiçbiri değil" kütlesini yükseltir. Diaris'te yüksek unknown
+    doğrudan aday açma demek olduğu için, β'yı o karara karıştırmak profil
+    kümesi şiştikçe daha çok konuşmacı üretirdi — hayaleti besleyen döngü.
+    Yeni konuşmacı kararı HAM kanıta bakmalı, β'dan etkilenmemeli.
+    """
+    torch = pytest.importorskip("torch")
+    # SPEAKER_00'a sınırda benzeyen ses: β devreye girerse unknown şişer.
+    borderline = torch.tensor([0.62, 0.30, 0.20, 0.0])
+
+    without_beta = _tracker_with_profiles(
+        torch, posterior=_settings(new_speaker=0.60, competitor_slope=0.0))
+    with_beta = _tracker_with_profiles(
+        torch, posterior=_settings(new_speaker=0.60, competitor_slope=2.0))
+
+    without_beta.map_speakers({"local": borderline}, {"local": 5.0})
+    with_beta.map_speakers({"local": borderline}, {"local": 5.0})
+
+    assert len(with_beta._candidates) == len(without_beta._candidates),         "beta yeni konuşmacı kararını etkilememeli"
+
+
+def test_posterior_does_not_change_the_ranking():
+    """Hangi profil seçildiği değişmemeli — sıralamaya dokunmuyoruz."""
+    torch = pytest.importorskip("torch")
+    embedding = torch.tensor([0.9, 0.3, 0.1, 0.0])
+
+    legacy = _tracker_with_profiles(torch)
+    modern = _tracker_with_profiles(torch, posterior=_settings())
+
+    assert (legacy.map_speakers({"local": embedding}, {"local": 5.0})
+            == modern.map_speakers({"local": embedding}, {"local": 5.0}))
+
+
 def test_warmup_ignores_chunks_without_embeddings():
     """Embedding üretmeyen chunk kalibrasyon süresini ilerletmez."""
     pytest.importorskip("torch")

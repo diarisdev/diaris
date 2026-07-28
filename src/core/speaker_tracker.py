@@ -21,8 +21,9 @@ import torch
 from ..config import (
     DIARIZATION_EMBEDDING_THRESHOLD, DIARIZATION_WARMUP_MS,
     CANDIDATE_CONFIRMATIONS_NEEDED, CANDIDATE_TTL, CANDIDATE_SELF_SIMILARITY,
-    MIN_NEW_SPEAKER_DURATION,
+    MIN_NEW_SPEAKER_DURATION, DIARIZATION_COHORT_NORM,
 )
+from .speaker_posterior import speaker_posterior
 
 
 def _cosine(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -103,9 +104,24 @@ class SpeakerTracker:
     # ulaşılınca eldeki embedding sayısı ne olursa olsun kümeleme yapılır.
     WARMUP_MAX_AUDIO_FACTOR = 2.0
 
-    def __init__(self, threshold=None, warmup_ms=None):
+    # --- Kohort (AS-norm) normalizasyonu -------------------------------- #
+    # Anlamlı bir impostor istatistiği için gereken min profil sayısı. 2 profille
+    # "diğerleri" tek örnek demek; ortalaması gürültüden ibarettir.
+    COHORT_MIN_PROFILES = 3
+    # Referans EMA hızı. Referans, "normal koşulda tipik impostor benzerliği"dir;
+    # sabit bir sayı yerine oturum içinde öğrenilir — mikrofon/oda/model değişince
+    # tüm benzerlik dağılımı kayar ve sabit bir referans yanlış olurdu.
+    COHORT_REFERENCE_MOMENTUM = 0.05
+
+    def __init__(self, threshold=None, warmup_ms=None, cohort_norm=None, posterior=None):
         self.threshold = threshold if threshold is not None else DIARIZATION_EMBEDDING_THRESHOLD
         self.warmup_ms = warmup_ms if warmup_ms is not None else DIARIZATION_WARMUP_MS
+        self.cohort_norm = cohort_norm if cohort_norm is not None else DIARIZATION_COHORT_NORM
+        # Öğrenilen impostor referansı (ilk gözlemde tohumlanır).
+        self._cohort_reference = None
+        # Kalibre posterior ayarları (PosteriorSettings) ya da None.
+        # None ise KARAR YOLU BİREBİR ESKİSİ GİBİ kalır — A/B tek anahtarla.
+        self.posterior = posterior
 
         # Bilinen konuşmacılar (warm-up sonrası dolu olur)
         self.known_speakers = {}  # {global_label: centroid_tensor}
@@ -145,6 +161,7 @@ class SpeakerTracker:
         self._warmup_complete = False
         self._candidates = []
         self._chunk_counter = 0
+        self._cohort_reference = None
         self.last_trace = None
         self.last_warmup_trace = None
 
@@ -297,6 +314,66 @@ class SpeakerTracker:
         if len(sims) >= 2:
             return (sims[0] + sims[1]) / 2.0
         return sims[0]
+
+    # ------------------------------------------------------------------ #
+    # Kohort (AS-norm) normalizasyonu
+    # ------------------------------------------------------------------ #
+    def _cohort_normalize(self, raw_scores: dict) -> dict:
+        """Utterance-seviyesi skor kaymasını düzeltir.
+
+        SORUN: ham kosinüs benzerliği utterance'lar arasında kıyaslanabilir
+        değildir. Kısa/gürültülü bir embedding TÜM profillere yakın çıkar
+        (hepsine ~0.6), temiz bir embedding hepsinden uzak durur (~0.3 + doğru
+        olanına 0.8). Tek bir global eşik bu ikisi için birden doğru olamaz;
+        birincide herkes eşiği geçer, ikincide kimse geçemez.
+
+        DÜZELTME: her skordan, o profilin gördüğü "impostor" ortalamasının
+        referanstan sapması çıkarılır:
+
+            s'_i = s_i - alpha * (ortalama_{j != i}(s_j) - referans)
+
+        Böylece soru "s_i eşiği geçti mi" olmaktan çıkıp "s_i kendi kohortuna
+        göre ne kadar sıra dışı" haline gelir. Dönüşüm s_i'de monotondur —
+        SIRALAMA DEĞİŞMEZ, yalnızca eşiğe göre konum ve margin ölçeklenir. Bu
+        bilinçli: sıralama en-yakın-komşu mantığının kalbi, ona dokunmuyoruz.
+
+        Referans sabit bir sayı değil, oturum içinde öğrenilen bir EMA'dır:
+        mikrofon/oda/model değişince tüm benzerlik dağılımı kayar.
+
+        YAN ETKİ (bilinçli): dönüşüm s_i'de doğrusal olduğundan skorlar arası
+        mesafe (1 + alpha/(K-1)) katına çıkar. Yani MIN_DECISION_MARGIN kapısı
+        normalizasyon AÇIKKEN daha az ateşler; margin eşiği bu ölçekte yeniden
+        okunmalıdır (AMI taramasının cevaplaması gereken sorulardan biri).
+
+        alpha = 0 (varsayılan) → ham skorlar aynen döner.
+        """
+        if self.cohort_norm <= 0.0 or len(raw_scores) < self.COHORT_MIN_PROFILES:
+            return raw_scores
+
+        labels = list(raw_scores)
+        total = sum(raw_scores.values())
+        count = len(labels)
+
+        # Referans için impostor istatistiği: EN İYİ eşleşme hariç ortalama.
+        # (En iyi eşleşme muhtemelen gerçek konuşmacıdır; onu impostor
+        #  havuzuna katmak referansı yukarı çeker ve düzeltmeyi zayıflatır.)
+        best_score = max(raw_scores.values())
+        impostor_mean = (total - best_score) / (count - 1)
+
+        if self._cohort_reference is None:
+            # İlk gözlem referansı TOHUMLAR → bu chunk düzeltilmeden geçer.
+            self._cohort_reference = impostor_mean
+        reference = self._cohort_reference
+
+        normalized = {}
+        for label in labels:
+            cohort_mean = (total - raw_scores[label]) / (count - 1)
+            normalized[label] = raw_scores[label] - self.cohort_norm * (cohort_mean - reference)
+
+        # Referansı gözlemden sonra güncelle (bu chunk kendi düzeltmesini etkilemesin).
+        momentum = self.COHORT_REFERENCE_MOMENTUM
+        self._cohort_reference = (1.0 - momentum) * reference + momentum * impostor_mean
+        return normalized
 
     # ------------------------------------------------------------------ #
     # Warm-up
@@ -567,8 +644,12 @@ class SpeakerTracker:
 
             # Bilinen konuşmacıları skorla ve SIRALA — yalnız en iyi skor değil,
             # en iyi ile ikinci arasındaki MARGIN de karara giriyor.
+            # Kohort normalizasyonu (kapalıysa ham skorlar aynen geçer) skorları
+            # utterance'lar arası kıyaslanabilir hale getirir; sıralamayı değiştirmez.
+            raw_scores = {label: self._similarity(emb, label) for label in self.known_speakers}
+            scores = self._cohort_normalize(raw_scores)
             ranked = sorted(
-                ((self._similarity(emb, label), label) for label in self.known_speakers),
+                ((score, label) for label, score in scores.items()),
                 key=lambda item: item[0],
                 reverse=True,
             )
@@ -600,40 +681,70 @@ class SpeakerTracker:
             # daha kötü bir aday hiç değildir.
             passes_threshold = best_match is not None and best_score >= effective_threshold
 
+            # --- Karar kapıları -------------------------------------------- #
+            # Posterior KAPALIYKEN (varsayılan) üç kapı da eskisiyle birebir
+            # aynıdır; A/B tek anahtarla yapılabilsin diye tek yerde toplandı.
+            posterior_result = None
+            if self.posterior is not None:
+                posterior_result = speaker_posterior(
+                    scores, self.posterior.config, duration=duration
+                )
+                policy = self.posterior.policy
+                accept = policy.is_confident(posterior_result)
+                should_learn = policy.may_learn(posterior_result) and quality >= 0.35
+                # Yeni konuşmacı için "hiçbiri değil" kütlesi GEREKLİ. Ölçüldü:
+                # candidate_promoted kararlarının çoğu referansta karşılık
+                # bulmuyor — hayalet üretiminin kapısı burası.
+                can_create = policy.may_create_speaker(posterior_result) and is_reliable
+            else:
+                accept = passes_threshold
+                should_learn = (has_margin
+                                and best_score > self.RESERVOIR_ADD_THRESHOLD
+                                and quality >= 0.35)
+                can_create = is_reliable
+
             # Teşhis: hangi kural ateşledi + profil güncellendi mi.
             decision = "unknown"
             reservoir_updated = False
 
-            if passes_threshold:
+            if accept:
                 # Etiket her iki durumda da verilir (en iyi tahmin), ama profil
                 # yalnızca KARARLI eşleşmede güncellenir.
                 mapping[local_label] = best_match
                 self._accumulate_speech(best_match, duration)
-                decision = "matched" if has_margin else "matched_ambiguous"
+                decision = ("matched" if (posterior_result is not None or has_margin)
+                            else "matched_ambiguous")
 
                 # Drift'i önle: rezervuara YALNIZCA yüksek güvenli, kararlı ve
                 # yeterli kaliteli eşleşmeler eklenir. Borderline ya da iki
                 # konuşmacı arasında kararsız sesler rezervuarı kirletip baskın
                 # konuşmacının herkese benzemesine yol açabilir.
-                if has_margin and best_score > self.RESERVOIR_ADD_THRESHOLD and quality >= 0.35:
+                if should_learn:
                     self._add_observation(best_match, emb)
                     reservoir_updated = True
-                elif not has_margin:
+                elif posterior_result is None and not has_margin:
                     runner_up = ranked[1][1]
                     print(f"  [Ambiguous] {best_match} vs {runner_up} "
                           f"(margin: {margin:.3f} < {self.MIN_DECISION_MARGIN}) "
                           f"— etiket verildi, profil güncellenmedi")
 
-            elif not is_reliable:
-                # Bilinmeyen AMA kısa/güvenilmez ses → yeni konuşmacı YARATMA.
-                # En yakın mevcut konuşmacıya yapıştır (sticky). Bu, kısa
-                # cümlelerin ("evet") yeni konuşmacı doğurmasını engeller.
+            elif not can_create:
+                # Eşleşme güvenli değil ve yeni konuşmacı açmaya da yetmiyor.
+                # Etiket yine en yakın konuşmacıdır (ekranda bir şey görünmeli).
                 mapping[local_label] = best_match if best_match else "Unknown"
-                self._accumulate_speech(mapping[local_label], duration)
-                decision = "sticky_short" if best_match else "unknown"
-                if best_match:
-                    print(f"  [Short utterance] sticky -> {best_match} "
-                          f"(score: {best_score:.3f}, {duration:.1f}s)")
+                if posterior_result is not None:
+                    # POSTERIOR YOLU FARKI: düşük güvenli atamanın süresi profile
+                    # YAZILMAZ. Ölçüldü: bu kararların ~%46'sı yanlış; bugün
+                    # süreleri yine de yanlış profilin olgunluk hanesini besliyor.
+                    # Ekrana çıkan etiket değişmez (DER riski yok), profiller
+                    # zamanla temizlenir.
+                    decision = "low_confidence" if best_match else "unknown"
+                else:
+                    self._accumulate_speech(mapping[local_label], duration)
+                    decision = "sticky_short" if best_match else "unknown"
+                    if best_match:
+                        print(f"  [Short utterance] sticky -> {best_match} "
+                              f"(score: {best_score:.3f}, {duration:.1f}s)")
 
             else:
                 # Bilinmeyen VE güvenilir (yeterince uzun) ses
@@ -683,6 +794,11 @@ class SpeakerTracker:
                     "maturity": float(maturity),
                     "effective_threshold": float(effective_threshold),
                     "scores": {label: float(score) for score, label in ranked},
+                    # Ham (normalizasyon öncesi) skorlar — düzeltmenin etkisi
+                    # teşhis penceresinde/analizde görülebilsin.
+                    "raw_scores": {label: float(v) for label, v in raw_scores.items()},
+                    "cohort_reference": (None if self._cohort_reference is None
+                                         else float(self._cohort_reference)),
                     "best": best_match,
                     "best_score": float(best_score),
                     # inf (tek konuşmacı → rekabet yok) JSON/arayüz için None.
@@ -692,6 +808,12 @@ class SpeakerTracker:
                     "reliable_duration": bool(is_reliable),
                     "decision": decision,
                     "reservoir_updated": reservoir_updated,
+                    # Posterior açıksa güven değerleri de ize girer (analiz ve
+                    # teşhis penceresi bunları okur).
+                    "p_best": (None if posterior_result is None
+                               else float(posterior_result.best_probability)),
+                    "p_unknown": (None if posterior_result is None
+                                  else float(posterior_result.unknown_probability)),
                 })
 
         # Şişen konuşmacı sayısını düzelt: birbirine çok benzeyen bilinenleri

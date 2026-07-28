@@ -76,6 +76,21 @@ def _place_runtime_assets(with_models: bool) -> None:
             shutil.copy2(example, dst_env)
             print(f"   .env.example -> {dst_env} (şablon; kullanıcı dolduracak)")
 
+    # calibration/: konuşmacı posterior parametreleri (~1 KB). Donmuş modda
+    # config yolu EXE DİZİNİNE göre çözüldüğü için bundle'a gömmek yetmez —
+    # exe'nin yanında olmalı. Eksik olursa uygulama çöker değil, sessizce eski
+    # eşik yoluna döner ve AMI'de ölçülen iyileşme (DER -4.3, cpWER -8.9)
+    # kaybolur; bu yüzden her build'de kopyalanır.
+    src_calibration = ROOT / "calibration"
+    if src_calibration.is_dir():
+        dst_calibration = DIST_APP / "calibration"
+        if dst_calibration.exists():
+            shutil.rmtree(dst_calibration)
+        shutil.copytree(src_calibration, dst_calibration)
+        print(f"   calibration/ kopyalandı -> {dst_calibration}")
+    else:
+        print("   UYARI: calibration/ yok — konuşmacı kararı eski eşik yoluna düşecek.")
+
     # models/: opsiyonel — büyük olduğundan varsayılan olarak KOPYALANMAZ.
     dst_models = DIST_APP / "models"
     if with_models:

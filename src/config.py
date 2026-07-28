@@ -76,6 +76,10 @@ class Settings:
     candidate_ttl: int
     candidate_self_similarity: float
     min_new_speaker_duration: float
+    diarization_cohort_norm: float
+    diarization_posterior: bool
+    posterior_calibration_path: Path
+    posterior_new_speaker: float
 
 
 def _resolve_whisper_path(local_models_dir: Path, device: str) -> Path:
@@ -168,6 +172,31 @@ def load_settings() -> Settings:
         candidate_ttl=int(os.getenv("CANDIDATE_TTL", "15")),
         candidate_self_similarity=float(os.getenv("CANDIDATE_SELF_SIMILARITY", "0.78")),
         min_new_speaker_duration=float(os.getenv("MIN_NEW_SPEAKER_DURATION", "2.0")),
+        # Kohort (AS-norm) normalizasyonu gücü. 0 = kapalı (ham kosinüs).
+        # Ham benzerlik utterance'lar arası KIYASLANABİLİR DEĞİLDİR: kısa/gürültülü
+        # bir embedding TÜM profillere yakın durur, temiz bir embedding hepsinden
+        # uzak durur. Tek bir global eşik ikisi için birden doğru olamaz.
+        # Düzeltme, her skordan o utterance'ın "impostor" (diğer profiller)
+        # ortalamasının referanstan sapmasını çıkarır.
+        # Varsayılan 0: canlı davranış AMI'de ölçülene kadar değişmesin
+        # (scripts/ami_replay --cohort-norm ile taranır).
+        diarization_cohort_norm=float(os.getenv("DIARIZATION_COHORT_NORM", "0.0")),
+        # Konuşmacı kararını sert eşik yerine KALİBRE POSTERIOR ile ver.
+        # AMI'de ölçüldü (iki bağımsız üçlü, biri kalibrasyonda hiç görülmemiş):
+        #   kalibrasyon seti : DER 40.55 -> 34.69   cpWER 53.50 -> 41.01
+        #   görülmemiş set   : DER 29.16 -> 24.82   cpWER 43.87 -> 34.96
+        # Kazanç tamamen confusion'dan (Miss ve WER değişmedi): konuşmacı
+        # yaratma olayları 3 kat azalıyor, hayalet profiller büyük ölçüde
+        # ortadan kalkıyor.
+        diarization_posterior=_env_bool("DIARIZATION_POSTERIOR", True),
+        # Kalibrasyon dosyası (izlenen). Yoksa sessizce eski eşik yoluna dönülür.
+        posterior_calibration_path=Path(
+            os.getenv("POSTERIOR_CALIBRATION",
+                      str(PROJECT_ROOT / "calibration" / "speaker_posterior.json"))
+        ),
+        # Yeni konuşmacı açma kapısı. Kalibrasyondan türemez (aşırı/eksik sayım
+        # dengesi bir tercihtir); AMI taramasıyla seçilir.
+        posterior_new_speaker=float(os.getenv("POSTERIOR_NEW_SPEAKER", "0.60")),
     )
 
 
@@ -263,3 +292,7 @@ CANDIDATE_CONFIRMATIONS_NEEDED = settings.candidate_confirmations_needed
 CANDIDATE_TTL = settings.candidate_ttl
 CANDIDATE_SELF_SIMILARITY = settings.candidate_self_similarity
 MIN_NEW_SPEAKER_DURATION = settings.min_new_speaker_duration
+DIARIZATION_COHORT_NORM = settings.diarization_cohort_norm
+DIARIZATION_POSTERIOR = settings.diarization_posterior
+POSTERIOR_CALIBRATION_PATH = str(settings.posterior_calibration_path)
+POSTERIOR_NEW_SPEAKER = settings.posterior_new_speaker
