@@ -435,6 +435,27 @@ class SpeakerTracker:
         self._finalize_warmup()
         return True
 
+    def _assign_warmup_sources(self, cluster_labels: dict) -> None:
+        """Warm-up embedding kaynaklarını oluşan konuşmacı etiketlerine eşler.
+
+        Kalibrasyon boyunca segmentler "[Calibrating...]" diye geçilir ve bugüne
+        kadar o etiket KALICIYDI — her oturumun ilk ~20 saniyesi kalıcı olarak
+        sahipsiz kalıyordu. Oysa hangi embedding'in hangi kümeye gittiği tam da
+        bu anda biliniyor; çağıran bu haritayla o segmentleri geriye dönük
+        etiketleyebilir.
+
+        Elenen kümelerin (gürültü filtresi) kaynakları haritaya girmez —
+        onlar için dürüst cevap "bilinmiyor"dur.
+        """
+        assignments = {}
+        for label, members in cluster_labels.items():
+            for index in members:
+                if 0 <= index < len(self._warmup_sources):
+                    key = self._warmup_sources[index]
+                    if key is not None:
+                        assignments[key] = label
+        self.warmup_assignments = assignments
+
     # --- Warm-up gürültü filtresi -------------------------------------- #
     # Tek üyeli küme "gürültü" sayılmadan önce, konuşmacı başına BİRDEN ÇOK
     # gözlem beklenebilecek kadar veri olmalı. 4-6 konuşmacılı bir toplantıda

@@ -178,6 +178,46 @@ def _emit_speaker_debug(ai_worker, on_speaker_debug) -> None:
         logger.exception("Speaker debug emit failed")
 
 
+def _flush_warmup_relabels(ai_worker, on_speaker_update, translation_engine,
+                           session_transcript, source_lang, target_lang,
+                           is_translation_needed) -> None:
+    """Kalibrasyon bitince geriye dönük konuşmacı etiketlerini yayınlar.
+
+    Warm-up boyunca segmentler "[Calibrating...]" etiketiyle gösterilir ve bugüne
+    kadar bu KALICIYDI: her oturumun ilk ~20 saniyesi sonsuza dek sahipsiz
+    kalıyordu. Kalibrasyon tamamlandığı anda hangi sesin hangi konuşmacıya ait
+    olduğu belli olur; bu fonksiyon o segmentleri gerçek etiketleriyle yeniden
+    yayınlar (UI aynı segment_index'i yerinde günceller).
+    """
+    relabels = getattr(ai_worker, "pending_warmup_relabels", None)
+    if not relabels:
+        return
+    ai_worker.pending_warmup_relabels = []
+
+    for segment_index, results in relabels:
+        try:
+            if is_translation_needed and translation_engine and results:
+                texts = [r.get("text") or "" for r in results]
+                for record, text in zip(results, translation_engine.translate_many(
+                        texts, source_lang, target_lang)):
+                    record["text"] = text
+
+            # Oturum geçmişini de düzelt — sonundaki refinement doğru etiketleri
+            # görmeli, "CALIBRATING" sözde etiketini değil.
+            if session_transcript is not None:
+                session_transcript.add_chunk(segment_index, results)
+
+            formatted = format_results(results, return_str=True)
+            if not formatted:
+                continue
+            if on_speaker_update:
+                on_speaker_update({"segment_index": segment_index, "text": formatted})
+            else:
+                print(f"\n[Kalibrasyon sonrası] Segment {segment_index}:\n{formatted}\n")
+        except Exception:
+            logger.exception("Warm-up relabel failed for segment %s", segment_index)
+
+
 def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None, translation_engine=None,
                       session_transcript=None, on_speaker_debug=None, speaker_debug_event=None):
     """Process queued diarization tasks in the background."""
@@ -213,12 +253,22 @@ def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None, tran
             # Sonuç: konuşmacıya göre bölünmüş, ÇEVRİLMEMİŞ segmentler.
             _t_diar = time.perf_counter()
             results = ai_worker.run_diarization(
-                waveform_16k, sample_rate, chunk_duration_ms, transcribed_segments
+                waveform_16k, sample_rate, chunk_duration_ms, transcribed_segments,
+                segment_index=segment_index,
             )
             diar_ms = (time.perf_counter() - _t_diar) * 1000.0
 
             if debug_on:
                 _emit_speaker_debug(ai_worker, on_speaker_debug)
+
+            # Kalibrasyon bu chunk'ta bittiyse, "[Calibrating...]" diye geçilen
+            # ÖNCEKİ segmentler artık gerçek konuşmacılarını biliyor. Oturumun
+            # ilk ~20 saniyesi kalıcı olarak sahipsiz kalmasın diye geriye dönük
+            # güncelleme gönderiyoruz.
+            _flush_warmup_relabels(
+                ai_worker, on_speaker_update, translation_engine, session_transcript,
+                source_lang, target_lang, is_translation_needed,
+            )
 
             # Çeviri: konuşmacı sınırından bölme SONRASI. TÜM segmentler TEK batch
             # çağrısında çevrilir — segment başına ayrı çağrı (özellikle yerel CPU

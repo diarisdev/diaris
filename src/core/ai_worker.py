@@ -191,6 +191,11 @@ class AIWorker:
         self._loaded = False
         self.speaker_tracker = SpeakerTracker(posterior=load_posterior_settings_or_none())
         self._runtime_config_path = None  # Geçici config dosyası yolu
+        # Kalibrasyon sırasındaki chunk'lar; warm-up bitince geriye dönük
+        # etiketlenip pending_warmup_relabels'e taşınır.
+        self._warmup_chunks = []
+        # [(segment_index, results), ...] — pipeline her chunk sonrası boşaltır.
+        self.pending_warmup_relabels = []
 
     def _prepare_runtime_config(self, config_path):
         """Diarization config'i runtime'da hazırlar (diarization_config'e delege)."""
@@ -490,6 +495,62 @@ class AIWorker:
             traceback.print_exc()
             return None
 
+    # Kalibrasyon sırasında tamponlanacak max chunk. Warm-up'ın kendi tavanı var
+    # (WARMUP_MAX_AUDIO_FACTOR) ama sessiz bir oturumda kalibrasyon hiç bitmeyip
+    # tampon büyüyebilir — sert bir sınır koyuyoruz.
+    MAX_WARMUP_BUFFER_CHUNKS = 40
+
+    def _buffer_warmup_chunk(self, segment_index, turns, transcribed_segments,
+                             local_labels) -> None:
+        """Kalibrasyon chunk'ını saklar — bitince geriye dönük etiketlenecek."""
+        if segment_index is None or len(self._warmup_chunks) >= self.MAX_WARMUP_BUFFER_CHUNKS:
+            return
+        self._warmup_chunks.append({
+            "segment_index": segment_index,
+            "turns": [dict(t) for t in turns],
+            "segments": [dict(s) for s in transcribed_segments],
+            "local_labels": list(local_labels),
+        })
+
+    def _build_warmup_relabels(self) -> list:
+        """Kalibrasyon bitince tamponlanan chunk'ları GERÇEK etiketlerle yeniden kurar.
+
+        Bugüne kadar oturumun ilk ~20 saniyesi kalıcı olarak "[Calibrating...]"
+        kalıyordu: konuşmacı bilgisi hiç verilmiyordu ve sonradan da düzeltilmiyordu.
+        Oysa hangi embedding'in hangi kümeye gittiği kalibrasyon anında biliniyor.
+
+        Yeniden eşleme `map_speakers` ÜZERİNDEN YAPILMAZ — o, profilleri günceller
+        ve aday tamponunu işletir; aynı sesi ikinci kez saymak profilleri
+        kirletirdi. Bunun yerine kümeleme sonucunun kendisi kullanılır.
+
+        Returns:
+            [(segment_index, results), ...] — yalnızca etiketi çözülebilen chunk'lar.
+        """
+        assignments = self.speaker_tracker.warmup_assignments or {}
+        relabels = []
+        for chunk in self._warmup_chunks:
+            index = chunk["segment_index"]
+            mapping = {}
+            for local in chunk["local_labels"]:
+                label = assignments.get((index, local))
+                if label:
+                    mapping[local] = label
+            if not mapping:
+                continue  # bu chunk'ın tüm embedding'leri elendi → dokunma
+
+            turns = [dict(t) for t in chunk["turns"]]
+            for turn in turns:
+                # Eşlenemeyen yerel konuşmacı (gürültü filtresine takılmış)
+                # için dürüst cevap "bilinmiyor".
+                turn["speaker"] = mapping.get(turn["speaker"], "Unknown")
+            results = assign_words_to_speakers(chunk["segments"], turns)
+            results = self._smooth_speaker_labels(results)
+            if results:
+                relabels.append((index, results))
+
+        self._warmup_chunks = []
+        return relabels
+
     def _attach_turn_spans_to_trace(self, turns):
         """Karar izindeki her probe'a ait turn aralıklarını (chunk-göreli) ekler.
 
@@ -512,7 +573,8 @@ class AIWorker:
         for probe in trace.get("probes", []):
             probe["turns"] = spans.get(probe["local_label"], [])
 
-    def run_diarization(self, waveform_16k, sample_rate, chunk_duration_ms, transcribed_segments):
+    def run_diarization(self, waveform_16k, sample_rate, chunk_duration_ms,
+                        transcribed_segments, segment_index=None):
         """
         Finalleşmiş bir ses parçası üzerinde pyannote diarization, konuşmacı eşleme
         ve etiket yumuşatma işlemlerini çalıştırır. Arka plan thread'inde çalışacak şekilde tasarlanmıştır.
@@ -542,7 +604,21 @@ class AIWorker:
                 # Chunk süresi tracker tarafında chunk başına BİR KEZ sayılır
                 # (eski embedding-seviyesi döngü N konuşmacılı chunk'ta süreyi
                 # N kat sayıyordu — bkz. add_warmup_chunk docstring'i).
-                self.speaker_tracker.add_warmup_chunk(embeddings_dict.values(), chunk_duration_ms)
+                #
+                # Kaynak anahtarları veriliyor: kalibrasyon bitince bu chunk'ları
+                # geriye dönük etiketleyebilmek için (aksi halde oturumun ilk
+                # ~20 saniyesi kalıcı olarak "[Calibrating]" kalırdı).
+                local_labels = list(embeddings_dict)
+                sources = [(segment_index, label) for label in local_labels]
+                self._buffer_warmup_chunk(segment_index, turns, transcribed_segments,
+                                          local_labels)
+                finished = self.speaker_tracker.add_warmup_chunk(
+                    [embeddings_dict[label] for label in local_labels],
+                    chunk_duration_ms,
+                    sources=sources,
+                )
+                if finished:
+                    self.pending_warmup_relabels = self._build_warmup_relabels()
 
                 remaining_ms = self.speaker_tracker.warmup_remaining_ms
                 if remaining_ms > 0:

@@ -126,6 +126,59 @@ def test_warmup_keeps_every_embedding_of_the_completing_chunk():
     assert len(tracker._reservoirs[label]) == 7
 
 
+# --------------------------------------------------------------------------- #
+# Geriye dönük kalibrasyon etiketleme
+#
+# Warm-up boyunca segmentler "[Calibrating...]" ile geçiliyor ve bu KALICIYDI —
+# her oturumun ilk ~20 saniyesi sonsuza dek sahipsiz kalıyordu. Oysa hangi
+# embedding'in hangi kümeye gittiği kalibrasyon anında biliniyor.
+# --------------------------------------------------------------------------- #
+def test_warmup_assignments_map_sources_to_speakers():
+    torch = pytest.importorskip("torch")
+    # warmup_ms=3000: ilk chunk (2000 ms) süre kapısını geçmez, ikincisi hem
+    # süreyi (4000) hem embedding kapısını (6) doldurur. Daha küçük bir değer
+    # ilk chunk'ta TAVANI tetikleyip kalibrasyonu erken bitirirdi.
+    tracker = _tracker(warmup_ms=3000)
+
+    voice_a = torch.tensor([1.0, 0.0])
+    voice_b = torch.tensor([0.0, 1.0])
+    tracker.add_warmup_chunk([voice_a, voice_b], 2000,
+                             sources=[(0, "SPEAKER_00"), (0, "SPEAKER_01")])
+    assert tracker.is_warming_up, "ilk chunk kalibrasyonu bitirmemeliydi"
+    tracker.add_warmup_chunk([voice_a] * 4, 2000,
+                             sources=[(i, "SPEAKER_00") for i in range(1, 5)])
+
+    assert not tracker.is_warming_up
+    assignments = tracker.warmup_assignments
+    # Her kaynak bir konuşmacıya eşlenmeli.
+    assert set(assignments) == {(0, "SPEAKER_00"), (0, "SPEAKER_01")} | {
+        (i, "SPEAKER_00") for i in range(1, 5)}
+    # Aynı ses aynı konuşmacıya gitmeli.
+    a_labels = {assignments[(i, "SPEAKER_00")] for i in range(1, 5)}
+    assert len(a_labels) == 1
+    # Farklı ses farklı konuşmacıya.
+    assert assignments[(0, "SPEAKER_01")] != a_labels.pop()
+
+
+def test_warmup_assignments_are_empty_without_sources():
+    """Kaynak verilmezse harita boş kalmalı — eski çağıranlar bozulmasın."""
+    torch = pytest.importorskip("torch")
+    tracker = _tracker(warmup_ms=1000)
+    tracker.add_warmup_chunk([torch.tensor([1.0, 0.0])] * 6, 2000)
+    assert not tracker.is_warming_up
+    assert tracker.warmup_assignments == {}
+
+
+def test_reset_clears_warmup_assignments():
+    torch = pytest.importorskip("torch")
+    tracker = _tracker(warmup_ms=1000)
+    tracker.add_warmup_chunk([torch.tensor([1.0, 0.0])] * 6, 2000,
+                             sources=[(i, "L") for i in range(6)])
+    assert tracker.warmup_assignments
+    tracker.reset()
+    assert tracker.warmup_assignments == {}
+
+
 def test_warmup_trace_is_recorded_even_without_debug():
     """Kalibrasyonun kaç embedding'le bittiği her zaman kayda geçmeli."""
     torch = pytest.importorskip("torch")
