@@ -92,6 +92,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "lang_ko": "Korece",
                 "lang_nl": "Hollandaca",
                 "lang_pt": "Portekizce",
+                "tab_session": "Oturum",
+                "tab_settings": "Ayarlar",
+                "group_interface": "Arayüz",
+                "group_advanced": "Gelişmiş",
+                "theme": "Tema",
+                "embedding_hint": "Konuşmacı kararlarını ve ses parmak izlerini görselleştirir.",
                 "analyzing": "Çözümleniyor...",
                 "live_prefix": "[Canlı] ",
                 "embedding_view": "Embedding görünümü",
@@ -134,6 +140,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "lang_ko": "Korean",
                 "lang_nl": "Dutch",
                 "lang_pt": "Portuguese",
+                "tab_session": "Session",
+                "tab_settings": "Settings",
+                "group_interface": "Interface",
+                "group_advanced": "Advanced",
+                "theme": "Theme",
+                "embedding_hint": "Visualises speaker decisions and voice fingerprints.",
                 "analyzing": "Resolving...",
                 "live_prefix": "[Live] ",
                 "embedding_view": "Embedding view",
@@ -182,11 +194,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.central_widget = QtWidgets.QWidget(self)
         self.central_widget.setObjectName("AppRoot")
         self.setCentralWidget(self.central_widget)
-        
+
         self.layout = QtWidgets.QVBoxLayout(self.central_widget)
         self.layout.setContentsMargins(24, 22, 24, 24)
         self.layout.setSpacing(16)
+        self.layout.addWidget(self._build_header())
 
+        # Tek sayfada biriken seçenekler okunamaz hale gelmişti ("Altyazı
+        # penceresi" başlığı altında çeviri dilleri, arayüz dili ve bir
+        # geliştirici aracı vardı). Ayrım KATEGORİYE değil DEĞİŞME SIKLIĞINA
+        # göre yapıldı: oturum başında dokunulanlar (cihaz, diller, başlat/
+        # durdur, günlük) bir sekmede; nadiren değişen tercihler diğerinde.
+        self.tabs = QtWidgets.QTabWidget(self.central_widget)
+        self.tabs.setObjectName("MainTabs")
+        self.tabs.setDocumentMode(True)   # çerçevesiz gövde — panel dili bozulmasın
+        self.tabs.addTab(self._build_session_page(), "")
+        self.tabs.addTab(self._build_settings_page(), "")
+        self.layout.addWidget(self.tabs, 1)
+
+    # ------------------------------------------------------------------ #
+    #  Arayüz parçaları                                                   #
+    # ------------------------------------------------------------------ #
+
+    def _build_header(self):
+        """Başlık şeridi — yalnızca kimlik. Tema butonu Ayarlar'a taşındı."""
         self.header = QtWidgets.QWidget(self.central_widget)
         self.header_layout = QtWidgets.QHBoxLayout(self.header)
         self.header_layout.setContentsMargins(0, 0, 0, 0)
@@ -198,238 +229,339 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.app_title = QtWidgets.QLabel("Diaris", title_box)
         self.app_title.setObjectName("AppTitle")
-        self.app_subtitle = QtWidgets.QLabel("Canlı transkripsiyon ve altyazı kontrol paneli", title_box)
+        self.app_subtitle = QtWidgets.QLabel(
+            "Canlı transkripsiyon ve altyazı kontrol paneli", title_box)
         self.app_subtitle.setObjectName("MutedLabel")
 
         title_layout.addWidget(self.app_title)
         title_layout.addWidget(self.app_subtitle)
-
-        self.theme_btn = QtWidgets.QPushButton("Aydınlık", self.header)
-        self.theme_btn.setObjectName("theme_btn")
-        self.theme_btn.setMinimumHeight(38)
-        self.theme_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DesktopIcon))
-        self.theme_btn.clicked.connect(self.toggle_theme)
-
         self.header_layout.addWidget(title_box, 1)
-        self.header_layout.addWidget(self.theme_btn)
+        return self.header
 
-        self.layout.addWidget(self.header)
-        
-        # --- CİHAZ SEÇİMİ PANELİ ---
-        self.device_group = QtWidgets.QFrame(self.central_widget)
+    def _build_session_page(self):
+        """Oturum sekmesi: kaynak + diller + kontroller + günlük."""
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 18, 0, 0)
+        layout.setSpacing(16)
+
+        layout.addWidget(self._build_source_panel())
+        layout.addWidget(self._build_control_panel())
+        layout.addWidget(self._build_log_panel(), 1)
+        return page
+
+    def _build_source_panel(self):
+        """Ses kaynağı + çeviri dili çifti.
+
+        Dil çifti bilerek burada: bir TERCİH değil, izlenen içeriğe göre
+        değişen bir OTURUM kararı — cihaz seçimiyle aynı kategoride.
+        """
+        self.device_group = QtWidgets.QFrame()
         self.device_group.setObjectName("Panel")
-        self.device_layout = QtWidgets.QHBoxLayout(self.device_group)
-        self.device_layout.setContentsMargins(16, 14, 16, 14)
-        self.device_layout.setSpacing(12)
-        
+        grid = QtWidgets.QGridLayout(self.device_group)
+        grid.setContentsMargins(16, 14, 16, 14)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(10)
+
         self.dev_label = QtWidgets.QLabel("Ses kaynağı", self.device_group)
         self.dev_label.setObjectName("SectionHeader")
-        
+
         self.device_combo = QtWidgets.QComboBox(self.device_group)
         self.device_combo.setMinimumHeight(42)
-        
+
         self.refresh_btn = QtWidgets.QPushButton(self.device_group)
         self.refresh_btn.setObjectName("IconButton")
         self.refresh_btn.setFixedSize(42, 42)
         self.refresh_btn.setToolTip("Cihazları yenile")
-        self.refresh_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_BrowserReload))
+        self.refresh_btn.setIcon(
+            self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_BrowserReload))
         self.refresh_btn.clicked.connect(self.refresh_devices)
-        
-        self.device_layout.addWidget(self.dev_label)
-        self.device_layout.addWidget(self.device_combo, 1)
-        self.device_layout.addWidget(self.refresh_btn)
-        
-        self.layout.addWidget(self.device_group)
-        
-        # --- BUTONLAR VE DURUM PANELİ ---
-        self.control_group = QtWidgets.QFrame(self.central_widget)
-        self.control_group.setObjectName("Panel")
-        self.control_layout = QtWidgets.QHBoxLayout(self.control_group)
-        self.control_layout.setContentsMargins(16, 14, 16, 14)
-        self.control_layout.setSpacing(10)
-        
-        self.status_label = QtWidgets.QLabel("Sistem Hazır.", self.control_group)
-        self.status_label.setObjectName("StatusLabel")
-        self.status_label.setProperty("status", "ready")
-        
-        self.start_btn = QtWidgets.QPushButton("Başlat", self.control_group)
-        self.start_btn.setObjectName("start_btn")
-        self.start_btn.setMinimumHeight(42)
-        self.start_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
-        self.start_btn.clicked.connect(self.start_recording)
-        
-        self.stop_btn = QtWidgets.QPushButton("Durdur", self.control_group)
-        self.stop_btn.setObjectName("stop_btn")
-        self.stop_btn.setMinimumHeight(42)
-        self.stop_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaStop))
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.clicked.connect(self.stop_recording)
-        
-        self.exit_btn = QtWidgets.QPushButton("Çıkış", self.control_group)
-        self.exit_btn.setObjectName("exit_btn")
-        self.exit_btn.setMinimumHeight(42)
-        self.exit_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogCloseButton))
-        self.exit_btn.clicked.connect(self.close_app)
-        
-        self.control_layout.addWidget(self.status_label, 1)
-        self.control_layout.addWidget(self.start_btn)
-        self.control_layout.addWidget(self.stop_btn)
-        self.control_layout.addWidget(self.exit_btn)
-        
-        self.layout.addWidget(self.control_group)
-        
-        # --- ALTYAZI AYARLARI PANELİ ---
-        self.settings_group = QtWidgets.QFrame(self.central_widget)
-        self.settings_group.setObjectName("Panel")
-        self.settings_layout = QtWidgets.QGridLayout(self.settings_group)
-        self.settings_layout.setContentsMargins(18, 18, 18, 18)
-        self.settings_layout.setHorizontalSpacing(14)
-        self.settings_layout.setVerticalSpacing(12)
-        
-        self.title_settings = QtWidgets.QLabel("Altyazı penceresi", self.settings_group)
-        self.title_settings.setObjectName("GroupTitle")
-        self.settings_layout.addWidget(self.title_settings, 0, 0, 1, 3)
-        
-        # Yazı Boyutu Ayarı
-        self.font_label = QtWidgets.QLabel("Yazı boyutu", self.settings_group)
-        self.font_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal, self.settings_group)
-        self.font_slider.setRange(8, 32)
-        self.font_slider.setValue(self.overlay.font_size)
-        self.font_slider.setMinimumWidth(260)
-        self.font_val_label = QtWidgets.QLabel(f"{self.overlay.font_size} px", self.settings_group)
-        self.font_val_label.setObjectName("ValueLabel")
-        self.font_slider.valueChanged.connect(self.on_font_changed)
-        
-        self.settings_layout.addWidget(self.font_label, 1, 0)
-        self.settings_layout.addWidget(self.font_slider, 1, 1)
-        self.settings_layout.addWidget(self.font_val_label, 1, 2)
-        
-        # Şeffaflık Ayarı
-        self.opacity_label = QtWidgets.QLabel("Opaklık", self.settings_group)
-        self.opacity_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal, self.settings_group)
-        self.opacity_slider.setRange(20, 100)
-        self.opacity_slider.setValue(int(self.overlay.opacity * 100))
-        self.opacity_val_label = QtWidgets.QLabel(f"{int(self.overlay.opacity * 100)}%", self.settings_group)
-        self.opacity_val_label.setObjectName("ValueLabel")
-        self.opacity_slider.valueChanged.connect(self.on_opacity_changed)
-        
-        self.settings_layout.addWidget(self.opacity_label, 2, 0)
-        self.settings_layout.addWidget(self.opacity_slider, 2, 1)
-        self.settings_layout.addWidget(self.opacity_val_label, 2, 2)
-        
-        # Dil Seçimi Ayarı
-        self.lang_label = QtWidgets.QLabel("Dil / Çeviri", self.settings_group)
-        
-        # Container for side-by-side comboboxes
-        self.lang_container = QtWidgets.QWidget(self.settings_group)
+
+        grid.addWidget(self.dev_label, 0, 0)
+        grid.addWidget(self.device_combo, 0, 1)
+        grid.addWidget(self.refresh_btn, 0, 2)
+
+        self.lang_label = QtWidgets.QLabel("Dil / Çeviri", self.device_group)
+        self.lang_label.setObjectName("SectionHeader")
+
+        self.lang_container = QtWidgets.QWidget(self.device_group)
         self.lang_container_layout = QtWidgets.QHBoxLayout(self.lang_container)
         self.lang_container_layout.setContentsMargins(0, 0, 0, 0)
         self.lang_container_layout.setSpacing(8)
-        
+
         self.source_lang_combo = QtWidgets.QComboBox(self.lang_container)
-        self.source_lang_combo.setMinimumHeight(36)
-        
-        arrow_label = QtWidgets.QLabel("➔", self.lang_container)
-        arrow_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #9aa6b2;")
+        self.source_lang_combo.setMinimumHeight(38)
+
+        arrow_label = QtWidgets.QLabel("→", self.lang_container)
+        arrow_label.setObjectName("ArrowLabel")
         arrow_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        
+
         self.target_lang_combo = QtWidgets.QComboBox(self.lang_container)
-        self.target_lang_combo.setMinimumHeight(36)
+        self.target_lang_combo.setMinimumHeight(38)
 
         self.lang_container_layout.addWidget(self.source_lang_combo, 1)
         self.lang_container_layout.addWidget(arrow_label)
         self.lang_container_layout.addWidget(self.target_lang_combo, 1)
-        
-        # Add popular languages to combos
-        for code, trans_key in self.POPULAR_LANGUAGES:
+
+        for code, _trans_key in self.POPULAR_LANGUAGES:
             self.source_lang_combo.addItem(code, code)
             self.target_lang_combo.addItem(code, code)
 
         from src.config import WHISPER_LANGUAGE
-        # Set default source language from config
         idx_src = self.source_lang_combo.findData(WHISPER_LANGUAGE)
+        if idx_src < 0:
+            idx_src = self.source_lang_combo.findData("en")
         if idx_src >= 0:
             self.source_lang_combo.setCurrentIndex(idx_src)
-        else:
-            idx_en = self.source_lang_combo.findData("en")
-            if idx_en >= 0:
-                self.source_lang_combo.setCurrentIndex(idx_en)
 
-        # Set default target language
         idx_tgt = self.target_lang_combo.findData(self.ui_lang)
         if idx_tgt >= 0:
             self.target_lang_combo.setCurrentIndex(idx_tgt)
-        
-        self.settings_layout.addWidget(self.lang_label, 3, 0)
-        self.settings_layout.addWidget(self.lang_container, 3, 1, 1, 2)
 
-        # Arayüz Dili Ayarı (UI Language)
-        self.ui_lang_label = QtWidgets.QLabel("Arayüz Dili", self.settings_group)
-        self.ui_lang_combo = QtWidgets.QComboBox(self.settings_group)
-        self.ui_lang_combo.addItem("Türkçe", "tr")
-        self.ui_lang_combo.addItem("English", "en")
-        self.ui_lang_combo.setMinimumHeight(36)
-        
-        # Set default selection
-        idx = self.ui_lang_combo.findData(self.ui_lang)
-        if idx >= 0:
-            self.ui_lang_combo.setCurrentIndex(idx)
-            
-        self.ui_lang_combo.currentIndexChanged.connect(self.on_ui_lang_changed)
-        
-        self.settings_layout.addWidget(self.ui_lang_label, 4, 0)
-        self.settings_layout.addWidget(self.ui_lang_combo, 4, 1, 1, 2)
-        
-        # Checkbox Kontrolleri
-        self.show_overlay_cb = QtWidgets.QCheckBox("Altyazı penceresini göster", self.settings_group)
-        self.show_overlay_cb.setChecked(self.overlay_visible)
-        self.show_overlay_cb.toggled.connect(self.set_overlay_visible)
-        
-        self.click_through_cb = QtWidgets.QCheckBox("Tıklamaları arkadaki pencereye geçir", self.settings_group)
-        self.click_through_cb.setChecked(self.overlay.click_through)
-        self.click_through_cb.toggled.connect(self.overlay.set_click_through)
-        
-        self.speaker_color_cb = QtWidgets.QCheckBox("Konuşmacı renklendirmesi", self.settings_group)
-        self.speaker_color_cb.setChecked(self.overlay.speaker_coloring)
-        self.speaker_color_cb.setToolTip("Altyazı metnini konuşmacı rengine boyar")
-        self.speaker_color_cb.toggled.connect(self.overlay.set_speaker_coloring)
-        
-        # Teşhis: konuşmacı kararlarını görselleştiren pencere. Kapalıyken
-        # tracker hiç iz üretmez (maliyet sıfır) — bkz. pipeline._sync_speaker_debug.
-        self.embedding_btn = QtWidgets.QPushButton("Embedding görünümü", self.settings_group)
-        self.embedding_btn.setMinimumHeight(34)
-        self.embedding_btn.clicked.connect(self.toggle_embedding_window)
+        grid.addWidget(self.lang_label, 1, 0)
+        grid.addWidget(self.lang_container, 1, 1, 1, 2)
+        grid.setColumnStretch(1, 1)
+        return self.device_group
 
-        self.settings_layout.addWidget(self.show_overlay_cb, 5, 0, 1, 3)
-        self.settings_layout.addWidget(self.click_through_cb, 6, 0, 1, 3)
-        self.settings_layout.addWidget(self.speaker_color_cb, 7, 0, 1, 3)
-        self.settings_layout.addWidget(self.embedding_btn, 8, 0, 1, 3)
-        
-        self.layout.addWidget(self.settings_group)
-        
-        # --- KAYIT / TRANSKRİPSİYON GÜNLÜĞÜ ---
-        self.log_group = QtWidgets.QFrame(self.central_widget)
+    def _build_control_panel(self):
+        """Durum + Başlat / Durdur / Çıkış."""
+        self.control_group = QtWidgets.QFrame()
+        self.control_group.setObjectName("Panel")
+        self.control_layout = QtWidgets.QHBoxLayout(self.control_group)
+        self.control_layout.setContentsMargins(16, 14, 16, 14)
+        self.control_layout.setSpacing(10)
+
+        self.status_label = QtWidgets.QLabel("Sistem Hazır.", self.control_group)
+        self.status_label.setObjectName("StatusLabel")
+        self.status_label.setProperty("status", "ready")
+
+        self.start_btn = QtWidgets.QPushButton("Başlat", self.control_group)
+        self.start_btn.setObjectName("start_btn")
+        self.start_btn.setMinimumHeight(42)
+        self.start_btn.setIcon(
+            self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
+        self.start_btn.clicked.connect(self.start_recording)
+
+        self.stop_btn = QtWidgets.QPushButton("Durdur", self.control_group)
+        self.stop_btn.setObjectName("stop_btn")
+        self.stop_btn.setMinimumHeight(42)
+        self.stop_btn.setIcon(
+            self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaStop))
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self.stop_recording)
+
+        self.exit_btn = QtWidgets.QPushButton("Çıkış", self.control_group)
+        self.exit_btn.setObjectName("exit_btn")
+        self.exit_btn.setMinimumHeight(42)
+        self.exit_btn.setIcon(
+            self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogCloseButton))
+        self.exit_btn.clicked.connect(self.close_app)
+
+        self.control_layout.addWidget(self.status_label, 1)
+        self.control_layout.addWidget(self.start_btn)
+        self.control_layout.addWidget(self.stop_btn)
+        self.control_layout.addWidget(self.exit_btn)
+        return self.control_group
+
+    def _build_log_panel(self):
+        """Canlı transkripsiyon günlüğü."""
+        self.log_group = QtWidgets.QFrame()
         self.log_group.setObjectName("Panel")
         self.log_layout = QtWidgets.QVBoxLayout(self.log_group)
         self.log_layout.setContentsMargins(18, 18, 18, 18)
         self.log_layout.setSpacing(12)
-        
+
         self.log_title = QtWidgets.QLabel("Canlı transkripsiyon günlüğü", self.log_group)
         self.log_title.setObjectName("GroupTitle")
-        
+
         self.log_text = QtWidgets.QTextEdit(self.log_group)
         self.log_text.setReadOnly(True)
         self.log_text.setFont(QtGui.QFont("Consolas", 11))
-        
+
         self.log_layout.addWidget(self.log_title)
         self.log_layout.addWidget(self.log_text)
-        
-        self.layout.addWidget(self.log_group, 1)
+        return self.log_group
+
+    def _build_settings_page(self):
+        """Ayarlar sekmesi: görünüm + arayüz + gelişmiş."""
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 18, 0, 0)
+        layout.setSpacing(16)
+
+        layout.addWidget(self._build_overlay_settings())
+        layout.addWidget(self._build_interface_settings())
+        layout.addWidget(self._build_advanced_settings())
+        layout.addStretch(1)
+        return page
+
+    def _build_overlay_settings(self):
+        """Altyazı penceresinin görünümü — artık gerçekten yalnızca o."""
+        self.settings_group = QtWidgets.QFrame()
+        self.settings_group.setObjectName("Panel")
+        grid = QtWidgets.QGridLayout(self.settings_group)
+        grid.setContentsMargins(18, 18, 18, 18)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(12)
+
+        self.title_settings = QtWidgets.QLabel("Altyazı penceresi", self.settings_group)
+        self.title_settings.setObjectName("GroupTitle")
+        grid.addWidget(self.title_settings, 0, 0, 1, 3)
+
+        self.font_label = QtWidgets.QLabel("Yazı boyutu", self.settings_group)
+        self.font_slider = QtWidgets.QSlider(
+            QtCore.Qt.Orientation.Horizontal, self.settings_group)
+        self.font_slider.setRange(8, 32)
+        self.font_slider.setValue(self.overlay.font_size)
+        self.font_slider.setMinimumWidth(240)
+        self.font_val_label = QtWidgets.QLabel(
+            f"{self.overlay.font_size} px", self.settings_group)
+        self.font_val_label.setObjectName("ValueLabel")
+        self.font_slider.valueChanged.connect(self.on_font_changed)
+
+        grid.addWidget(self.font_label, 1, 0)
+        grid.addWidget(self.font_slider, 1, 1)
+        grid.addWidget(self.font_val_label, 1, 2)
+
+        self.opacity_label = QtWidgets.QLabel("Opaklık", self.settings_group)
+        self.opacity_slider = QtWidgets.QSlider(
+            QtCore.Qt.Orientation.Horizontal, self.settings_group)
+        self.opacity_slider.setRange(20, 100)
+        self.opacity_slider.setValue(int(self.overlay.opacity * 100))
+        self.opacity_val_label = QtWidgets.QLabel(
+            f"{int(self.overlay.opacity * 100)}%", self.settings_group)
+        self.opacity_val_label.setObjectName("ValueLabel")
+        self.opacity_slider.valueChanged.connect(self.on_opacity_changed)
+
+        grid.addWidget(self.opacity_label, 2, 0)
+        grid.addWidget(self.opacity_slider, 2, 1)
+        grid.addWidget(self.opacity_val_label, 2, 2)
+
+        self.show_overlay_cb = QtWidgets.QCheckBox(
+            "Altyazı penceresini göster", self.settings_group)
+        self.show_overlay_cb.setChecked(self.overlay_visible)
+        self.show_overlay_cb.toggled.connect(self.set_overlay_visible)
+
+        self.click_through_cb = QtWidgets.QCheckBox(
+            "Tıklamaları arkadaki pencereye geçir", self.settings_group)
+        self.click_through_cb.setChecked(self.overlay.click_through)
+        self.click_through_cb.toggled.connect(self.overlay.set_click_through)
+
+        self.speaker_color_cb = QtWidgets.QCheckBox(
+            "Konuşmacı renklendirmesi", self.settings_group)
+        self.speaker_color_cb.setChecked(self.overlay.speaker_coloring)
+        self.speaker_color_cb.setToolTip("Altyazı metnini konuşmacı rengine boyar")
+        self.speaker_color_cb.toggled.connect(self.overlay.set_speaker_coloring)
+
+        grid.addWidget(self.show_overlay_cb, 3, 0, 1, 3)
+        grid.addWidget(self.click_through_cb, 4, 0, 1, 3)
+        grid.addWidget(self.speaker_color_cb, 5, 0, 1, 3)
+        grid.setColumnStretch(1, 1)
+        return self.settings_group
+
+    def _build_interface_settings(self):
+        """Arayüz dili + tema — neredeyse hiç değişmeyen tercihler."""
+        self.interface_group = QtWidgets.QFrame()
+        self.interface_group.setObjectName("Panel")
+        grid = QtWidgets.QGridLayout(self.interface_group)
+        grid.setContentsMargins(18, 18, 18, 18)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(12)
+
+        self.title_interface = QtWidgets.QLabel("Arayüz", self.interface_group)
+        self.title_interface.setObjectName("GroupTitle")
+        grid.addWidget(self.title_interface, 0, 0, 1, 3)
+
+        self.ui_lang_label = QtWidgets.QLabel("Arayüz Dili", self.interface_group)
+        self.ui_lang_combo = QtWidgets.QComboBox(self.interface_group)
+        self.ui_lang_combo.addItem("Türkçe", "tr")
+        self.ui_lang_combo.addItem("English", "en")
+        self.ui_lang_combo.setMinimumHeight(38)
+        idx = self.ui_lang_combo.findData(self.ui_lang)
+        if idx >= 0:
+            self.ui_lang_combo.setCurrentIndex(idx)
+        self.ui_lang_combo.currentIndexChanged.connect(self.on_ui_lang_changed)
+
+        self.theme_label = QtWidgets.QLabel("Tema", self.interface_group)
+        self.theme_btn = QtWidgets.QPushButton("Aydınlık", self.interface_group)
+        self.theme_btn.setObjectName("theme_btn")
+        self.theme_btn.setMinimumHeight(38)
+        self.theme_btn.setIcon(
+            self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DesktopIcon))
+        self.theme_btn.clicked.connect(self.toggle_theme)
+
+        grid.addWidget(self.ui_lang_label, 1, 0)
+        grid.addWidget(self.ui_lang_combo, 1, 1, 1, 2)
+        grid.addWidget(self.theme_label, 2, 0)
+        grid.addWidget(self.theme_btn, 2, 1, 1, 2)
+        grid.setColumnStretch(1, 1)
+        return self.interface_group
+
+    def _build_advanced_settings(self):
+        """Geliştirici araçları — normal kullanıcının işine yaramaz, ayrı dursun."""
+        self.advanced_group = QtWidgets.QFrame()
+        self.advanced_group.setObjectName("Panel")
+        layout = QtWidgets.QVBoxLayout(self.advanced_group)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
+
+        self.title_advanced = QtWidgets.QLabel("Gelişmiş", self.advanced_group)
+        self.title_advanced.setObjectName("GroupTitle")
+
+        # Teşhis penceresi: kapalıyken tracker hiç iz üretmez (maliyet sıfır)
+        # — bkz. pipeline._sync_speaker_debug.
+        self.embedding_btn = QtWidgets.QPushButton(
+            "Embedding görünümü", self.advanced_group)
+        self.embedding_btn.setMinimumHeight(38)
+        self.embedding_btn.clicked.connect(self.toggle_embedding_window)
+
+        self.embedding_hint = QtWidgets.QLabel(
+            "Konuşmacı kararlarını ve ses parmak izlerini görselleştirir.",
+            self.advanced_group)
+        self.embedding_hint.setObjectName("MutedLabel")
+        self.embedding_hint.setWordWrap(True)
+
+        layout.addWidget(self.title_advanced)
+        layout.addWidget(self.embedding_btn)
+        layout.addWidget(self.embedding_hint)
+        return self.advanced_group
 
     def apply_styles(self):
         self.DARK_STYLESHEET = """
             QMainWindow {
                 background-color: #0f1115;
+            }
+            /* --- Sekmeler: cercevesiz, altcizgili (modern) --- */
+            QTabWidget#MainTabs::pane {
+                border: none;
+                background: transparent;
+                top: -1px;
+            }
+            QTabWidget#MainTabs > QTabBar {
+                background: transparent;
+            }
+            QTabBar::tab {
+                background: transparent;
+                border: none;
+                border-bottom: 2px solid transparent;
+                color: #9aa6b2;
+                font-family: "Segoe UI";
+                font-size: 14px;
+                font-weight: 600;
+                padding: 9px 20px 9px 4px;
+                margin-right: 18px;
+            }
+            QTabBar::tab:hover {
+                color: #e8edf3;
+            }
+            QTabBar::tab:selected {
+                color: #f8fafc;
+                border-bottom: 2px solid #2dd4bf;
+            }
+            QLabel#ArrowLabel {
+                color: #64748b;
+                font-size: 17px;
+                font-weight: 700;
             }
             QWidget#AppRoot {
                 background-color: #0f1115;
@@ -615,6 +747,38 @@ class MainWindow(QtWidgets.QMainWindow):
         self.LIGHT_STYLESHEET = """
             QMainWindow {
                 background-color: #f6f8fb;
+            }
+            /* --- Sekmeler: cercevesiz, altcizgili (modern) --- */
+            QTabWidget#MainTabs::pane {
+                border: none;
+                background: transparent;
+                top: -1px;
+            }
+            QTabWidget#MainTabs > QTabBar {
+                background: transparent;
+            }
+            QTabBar::tab {
+                background: transparent;
+                border: none;
+                border-bottom: 2px solid transparent;
+                color: #64748b;
+                font-family: "Segoe UI";
+                font-size: 14px;
+                font-weight: 600;
+                padding: 9px 20px 9px 4px;
+                margin-right: 18px;
+            }
+            QTabBar::tab:hover {
+                color: #172033;
+            }
+            QTabBar::tab:selected {
+                color: #0f172a;
+                border-bottom: 2px solid #0d9488;
+            }
+            QLabel#ArrowLabel {
+                color: #94a3b8;
+                font-size: 17px;
+                font-weight: 700;
             }
             QWidget#AppRoot {
                 background-color: #f6f8fb;
@@ -922,7 +1086,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_btn.setText(trans["stop"])
         self.exit_btn.setText(trans["exit"])
         
+        self.tabs.setTabText(0, trans["tab_session"])
+        self.tabs.setTabText(1, trans["tab_settings"])
         self.title_settings.setText(trans["subtitle_window"])
+        self.title_interface.setText(trans["group_interface"])
+        self.title_advanced.setText(trans["group_advanced"])
+        self.theme_label.setText(trans["theme"])
+        self.embedding_hint.setText(trans["embedding_hint"])
         self.font_label.setText(trans["font_size"])
         self.opacity_label.setText(trans["opacity"])
         self.lang_label.setText(trans["audio_translation"])
