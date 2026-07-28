@@ -49,7 +49,11 @@ class EvalSpeakerTracker(SpeakerTracker):
 
         n = len(buf)
         if n == 1:
-            self.known_speakers[self._next_label()] = buf[0]
+            label = self._next_label()
+            self.known_speakers[label] = buf[0]
+            # Teşhis izi: base sınıfın kaydını override ettiğimiz için burada da
+            # yazmalıyız, yoksa AMI yolunda kalibrasyon izi hiç oluşmaz.
+            self._record_warmup_trace(None, {label: [0]}, n)
             self._warmup_complete = True
             self._warmup_buffer = []
             print("[Warm-up Complete] 1 speaker (eval) ")
@@ -77,12 +81,18 @@ class EvalSpeakerTracker(SpeakerTracker):
             del clusters[best_j]
 
         # Singleton filtreleme YOK — her küme bir konuşmacı
+        cluster_labels = {}
         for members in clusters.values():
             centroid = torch.stack([buf[i] for i in members]).mean(dim=0)
             norm = torch.norm(centroid)
             if norm > 0:
                 centroid = centroid / norm
-            self.known_speakers[self._next_label()] = centroid
+            label = self._next_label()
+            self.known_speakers[label] = centroid
+            cluster_labels[label] = list(members)
+
+        # Teşhis izi (base sınıfın kaydı override edildiği için burada).
+        self._record_warmup_trace(sim, cluster_labels, n)
 
         self._warmup_complete = True
         self._warmup_buffer = []

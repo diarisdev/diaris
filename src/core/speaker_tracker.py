@@ -92,6 +92,17 @@ class SpeakerTracker:
     # olgun ikinciye düşüyor, aday tamponuna gitmiyor.
     MATURITY_THRESHOLD_PENALTY = 0.06  # genç profile eklenen max eşik cezası
 
+    # --- Warm-up kapıları ----------------------------------------------- #
+    # Kalibrasyonun bitmesi için İKİ koşul da gerekir: yeterli SES ve yeterli
+    # EMBEDDING. Yalnız süreye bakmak, uzun ama az konuşmacılı chunk'larda
+    # kümelemeyi 2-3 örnekle kurabiliyordu (10 sn'lik iki chunk = 20 sn ses,
+    # 2 embedding). Üstelik _finalize_warmup'ın gürültü filtresi ancak n >= 6'da
+    # devreye giriyor; altında her tekil embedding ayrı konuşmacı oluyor.
+    WARMUP_MIN_EMBEDDINGS = 6
+    # Tavan: embedding kapısı kalibrasyonu sonsuza kadar erteleyemesin. Bu süreye
+    # ulaşılınca eldeki embedding sayısı ne olursa olsun kümeleme yapılır.
+    WARMUP_MAX_AUDIO_FACTOR = 2.0
+
     def __init__(self, threshold=None, warmup_ms=None):
         self.threshold = threshold if threshold is not None else DIARIZATION_EMBEDDING_THRESHOLD
         self.warmup_ms = warmup_ms if warmup_ms is not None else DIARIZATION_WARMUP_MS
@@ -113,6 +124,16 @@ class SpeakerTracker:
         self._candidates = []
         self._chunk_counter = 0
 
+        # --- Teşhis (embedding görünümü) --------------------------------- #
+        # Kapalıyken maliyet SIFIR olmalı: skorlar zaten hesaplanıyor, ama
+        # rezervuar/embedding kopyalamak bedava değil. Arayüz pencereyi açınca
+        # açılır.
+        self.debug_enabled = False
+        self.last_trace = None
+        # Warm-up izi her zaman tutulur (oturumda bir kez, küçük): pencere
+        # sonradan açılsa da kalibrasyonun nasıl gittiği görülebilsin.
+        self.last_warmup_trace = None
+
     def reset(self):
         """Tracker durumunu sıfırlayarak yeni bir dosya için hazır hale getirir."""
         self.known_speakers = {}
@@ -124,6 +145,48 @@ class SpeakerTracker:
         self._warmup_complete = False
         self._candidates = []
         self._chunk_counter = 0
+        self.last_trace = None
+        self.last_warmup_trace = None
+
+    # ------------------------------------------------------------------ #
+    # Teşhis yardımcıları
+    # ------------------------------------------------------------------ #
+    # Warm-up izinde saklanacak max embedding sayısı (n×n matris büyümesin).
+    WARMUP_TRACE_MAX_N = 200
+
+    def _record_warmup_trace(self, sim_matrix, cluster_labels: dict, n: int) -> None:
+        """Kalibrasyon sonucunu teşhis için saklar.
+
+        `debug_enabled`'dan bağımsızdır: warm-up oturumda bir kez olur ve pencere
+        sonradan açıldığında da "kaç embedding'le kalibre oldu" sorusu
+        cevaplanabilmelidir. Bu soru, kalibrasyonun erken bitip bitmediğini
+        gösteren tek doğrudan kanıttır.
+        """
+        matrix = None
+        if sim_matrix is not None and n <= self.WARMUP_TRACE_MAX_N:
+            matrix = sim_matrix.detach().cpu().numpy().copy()
+        self.last_warmup_trace = {
+            "embedding_count": n,
+            "audio_ms": self._warmup_audio_ms,
+            "similarity_matrix": matrix,
+            "clusters": {label: list(idx) for label, idx in cluster_labels.items()},
+            "threshold": self.threshold,
+            "filtered": n - sum(len(idx) for idx in cluster_labels.values()),
+        }
+
+    def _speaker_snapshot(self) -> dict:
+        """Konuşmacı profillerinin donmuş numpy görüntüsü (teşhis penceresi için)."""
+        snapshot = {}
+        for label, centroid in self.known_speakers.items():
+            snapshot[label] = {
+                "centroid": centroid.detach().cpu().numpy().copy(),
+                "reservoir": [
+                    e.detach().cpu().numpy().copy()
+                    for e in self._reservoirs.get(label, [])
+                ],
+                "speech_seconds": float(self._speech_seconds.get(label, 0.0)),
+            }
+        return snapshot
 
     def _next_label(self):
         label = f"SPEAKER_{self._next_id:02d}"
@@ -133,6 +196,16 @@ class SpeakerTracker:
     @property
     def is_warming_up(self):
         return not self._warmup_complete
+
+    @property
+    def warmup_remaining_ms(self) -> int:
+        """Kalibrasyonun süre kapısı için kalan ms (0 olabilir, bkz. embedding kapısı).
+
+        0 dönmesi warm-up'ın bittiği anlamına GELMEZ: süre dolmuş ama henüz
+        WARMUP_MIN_EMBEDDINGS toplanmamış olabilir. Bitip bitmediği için
+        `is_warming_up` kullanılmalı.
+        """
+        return max(0, self.warmup_ms - self._warmup_audio_ms)
 
     # ------------------------------------------------------------------ #
     # Rezervuar yardımcıları
@@ -228,21 +301,47 @@ class SpeakerTracker:
     # ------------------------------------------------------------------ #
     # Warm-up
     # ------------------------------------------------------------------ #
-    def add_warmup_embedding(self, embedding, chunk_duration_ms):
-        """
-        Warm-up fazında embedding toplar.
-        Yeterli ses birikince warm-up'ı sonlandırır.
+    def add_warmup_chunk(self, embeddings, chunk_duration_ms):
+        """Warm-up fazında BİR CHUNK'ın embedding'lerini toplar.
+
+        API bilerek chunk seviyesindedir. Önceki embedding-seviyesi sürüm
+        (`add_warmup_embedding`) çağıranın her embedding için ayrı çağırmasını
+        gerektiriyordu ve chunk süresi HER çağrıda sayıldığı için N konuşmacılı
+        chunk'ta süre N katına çıkıyordu: "20 sn kalibrasyon" 4 konuşmacılı bir
+        toplantıda ~5 sn'de bitiyordu. Yani kalibrasyon, en çok veriye ihtiyaç
+        duyulan durumda (kalabalık toplantı) en az veriyle kapanıyordu — ve
+        warm-up kümelemesi tüm oturumun konuşmacı kümesini belirlediği için hata
+        oturum boyunca yayılıyordu. Chunk seviyesi imza bu yanlışı imkânsız kılar.
+
+        Embedding üretmeyen chunk kalibrasyona katkı yapmadığı için süresi de
+        sayılmaz — aksi halde süre kapısı boş chunk'larla dolup kümeleme
+        birkaç örnekle kurulabilirdi.
+
+        Args:
+            embeddings: bu chunk'tan çıkan embedding tensörleri (iterable).
+            chunk_duration_ms: chunk'ın süresi — TOPLAMA BİR KEZ eklenir.
 
         Returns:
-            bool: True ise warm-up bitti (baseline hazır)
+            bool: True ise warm-up bu çağrıda bitti (baseline hazır).
         """
-        self._warmup_buffer.append(embedding.cpu())
+        collected = [emb for emb in embeddings if emb is not None]
+        if not collected:
+            return False
+
+        for embedding in collected:
+            self._warmup_buffer.append(embedding.cpu())
         self._warmup_audio_ms += chunk_duration_ms
 
-        if self._warmup_audio_ms >= self.warmup_ms:
-            self._finalize_warmup()
-            return True
-        return False
+        # Kapı 1: yeterli ses.
+        if self._warmup_audio_ms < self.warmup_ms:
+            return False
+        # Kapı 2: yeterli embedding — tavana ulaşılmadıysa beklenir.
+        if (len(self._warmup_buffer) < self.WARMUP_MIN_EMBEDDINGS
+                and self._warmup_audio_ms < self.warmup_ms * self.WARMUP_MAX_AUDIO_FACTOR):
+            return False
+
+        self._finalize_warmup()
+        return True
 
     def _finalize_warmup(self):
         """
@@ -260,6 +359,7 @@ class SpeakerTracker:
         if n == 1:
             # Tek embedding varsa direkt konuşmacı oluştur
             label = self._register_speaker([self._warmup_buffer[0]])
+            self._record_warmup_trace(None, {label: [0]}, n)
             self._warmup_complete = True
             self._warmup_buffer = []
             print(f"[Warm-up Complete] 1 speaker detected: {label}")
@@ -317,9 +417,14 @@ class SpeakerTracker:
             valid_clusters = {largest[0]: largest[1]}
 
         # Her kümeden konuşmacı oluştur (rezervuar = küme üyeleri)
+        cluster_labels = {}
         for member_indices in valid_clusters.values():
             member_embs = [self._warmup_buffer[i] for i in member_indices]
-            self._register_speaker(member_embs)
+            cluster_labels[self._register_speaker(member_embs)] = list(member_indices)
+
+        # Kalibrasyonun ne kadar sağlam olduğunu görünür kıl: kaç embedding'le
+        # bitti, hangi kümeler oluştu, çiftler arası benzerlik neydi.
+        self._record_warmup_trace(sim_matrix, cluster_labels, n)
 
         self._warmup_complete = True
 
@@ -453,6 +558,7 @@ class SpeakerTracker:
         self._chunk_counter += 1
         self._expire_old_candidates()
         mapping = {}
+        probes = []
 
         for local_label, emb in embeddings_dict.items():
             emb = emb.cpu()
@@ -494,11 +600,16 @@ class SpeakerTracker:
             # daha kötü bir aday hiç değildir.
             passes_threshold = best_match is not None and best_score >= effective_threshold
 
+            # Teşhis: hangi kural ateşledi + profil güncellendi mi.
+            decision = "unknown"
+            reservoir_updated = False
+
             if passes_threshold:
                 # Etiket her iki durumda da verilir (en iyi tahmin), ama profil
                 # yalnızca KARARLI eşleşmede güncellenir.
                 mapping[local_label] = best_match
                 self._accumulate_speech(best_match, duration)
+                decision = "matched" if has_margin else "matched_ambiguous"
 
                 # Drift'i önle: rezervuara YALNIZCA yüksek güvenli, kararlı ve
                 # yeterli kaliteli eşleşmeler eklenir. Borderline ya da iki
@@ -506,6 +617,7 @@ class SpeakerTracker:
                 # konuşmacının herkese benzemesine yol açabilir.
                 if has_margin and best_score > self.RESERVOIR_ADD_THRESHOLD and quality >= 0.35:
                     self._add_observation(best_match, emb)
+                    reservoir_updated = True
                 elif not has_margin:
                     runner_up = ranked[1][1]
                     print(f"  [Ambiguous] {best_match} vs {runner_up} "
@@ -518,6 +630,7 @@ class SpeakerTracker:
                 # cümlelerin ("evet") yeni konuşmacı doğurmasını engeller.
                 mapping[local_label] = best_match if best_match else "Unknown"
                 self._accumulate_speech(mapping[local_label], duration)
+                decision = "sticky_short" if best_match else "unknown"
                 if best_match:
                     print(f"  [Short utterance] sticky -> {best_match} "
                           f"(score: {best_score:.3f}, {duration:.1f}s)")
@@ -536,6 +649,7 @@ class SpeakerTracker:
                         # Aday onaylandı, gerçek konuşmacı oldu
                         mapping[local_label] = promoted_label
                         self._accumulate_speech(promoted_label, duration)
+                        decision = "candidate_promoted"
                         closest_info = f" (closest: {best_match}, score: {best_score:.3f})" if best_match else ""
                         confirms = len(self._candidates[cand_idx]["embeddings"])
                         # ASCII-only: emoji cp1254/cp1252 Windows konsollarında
@@ -545,6 +659,7 @@ class SpeakerTracker:
                     else:
                         # Henüz yeterli onay yok — en yakın bilinen konuşmacıya ata
                         mapping[local_label] = best_match if best_match else "Unknown"
+                        decision = "candidate_pending"
                         confirms = len(self._candidates[cand_idx]["embeddings"])
                         needed = self.CANDIDATE_CONFIRMATIONS_NEEDED
                         print(f"  [Candidate] pending ({confirms}/{needed}), mapped to {mapping[local_label]}")
@@ -555,8 +670,29 @@ class SpeakerTracker:
                         "created_at": self._chunk_counter,
                     })
                     mapping[local_label] = best_match if best_match else "Unknown"
+                    decision = "candidate_new"
                     closest_info = f" (closest: {best_match}, score: {best_score:.3f})" if best_match else ""
                     print(f"  [Candidate] new candidate registered{closest_info}, mapped to {mapping[local_label]}")
+
+            if self.debug_enabled:
+                probes.append({
+                    "local_label": local_label,
+                    "embedding": emb.detach().numpy().copy(),
+                    "duration": None if duration == float("inf") else float(duration),
+                    "quality": float(quality),
+                    "maturity": float(maturity),
+                    "effective_threshold": float(effective_threshold),
+                    "scores": {label: float(score) for score, label in ranked},
+                    "best": best_match,
+                    "best_score": float(best_score),
+                    # inf (tek konuşmacı → rekabet yok) JSON/arayüz için None.
+                    "margin": None if margin == float("inf") else float(margin),
+                    "has_margin": bool(has_margin),
+                    "passed_threshold": bool(passes_threshold),
+                    "reliable_duration": bool(is_reliable),
+                    "decision": decision,
+                    "reservoir_updated": reservoir_updated,
+                })
 
         # Şişen konuşmacı sayısını düzelt: birbirine çok benzeyen bilinenleri
         # birleştir ve bu chunk'ın eşlemesini de remap'le güncelle.
@@ -565,6 +701,22 @@ class SpeakerTracker:
             for local_label, glabel in mapping.items():
                 if glabel in remap:
                     mapping[local_label] = remap[glabel]
+
+        if self.debug_enabled:
+            # 'assigned' NİHAİ eşlemeden okunur: merge remap'i kararı değiştirmiş
+            # olabilir.
+            for probe in probes:
+                probe["assigned"] = mapping.get(probe["local_label"])
+            self.last_trace = {
+                "chunk_index": self._chunk_counter,
+                "probes": probes,
+                "speakers": self._speaker_snapshot(),
+                "merged": dict(remap),
+                "candidate_count": len(self._candidates),
+                "merge_threshold": 0.85,
+                "reservoir_add_threshold": self.RESERVOIR_ADD_THRESHOLD,
+                "min_decision_margin": self.MIN_DECISION_MARGIN,
+            }
 
         return mapping
 

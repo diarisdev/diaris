@@ -491,14 +491,19 @@ class AIWorker:
 
             # --- Warm-up / Aktif faz ---
             if self.speaker_tracker.is_warming_up:
-                # Warm-up: embedding topla, konuşmacı etiketi atama
-                for emb in embeddings_dict.values():
-                    warmup_done = self.speaker_tracker.add_warmup_embedding(emb, chunk_duration_ms)
-                    if warmup_done:
-                        break
+                # Warm-up: embedding topla, konuşmacı etiketi atama.
+                # Chunk süresi tracker tarafında chunk başına BİR KEZ sayılır
+                # (eski embedding-seviyesi döngü N konuşmacılı chunk'ta süreyi
+                # N kat sayıyordu — bkz. add_warmup_chunk docstring'i).
+                self.speaker_tracker.add_warmup_chunk(embeddings_dict.values(), chunk_duration_ms)
 
-                remaining_ms = max(0, self.speaker_tracker.warmup_ms - self.speaker_tracker._warmup_audio_ms)
-                warmup_label = f"[Calibrating... {remaining_ms / 1000:.0f}s]"
+                remaining_ms = self.speaker_tracker.warmup_remaining_ms
+                if remaining_ms > 0:
+                    warmup_label = f"[Calibrating... {remaining_ms / 1000:.0f}s]"
+                else:
+                    # Süre doldu ama embedding kapısı henüz açılmadı; geri sayım
+                    # göstermek "takılmış" izlenimi verir.
+                    warmup_label = "[Calibrating...]"
                 speaker_mapping = {t["speaker"]: warmup_label for t in turns}
             else:
                 # Aktif faz: embedding-based konuşmacı eşleme

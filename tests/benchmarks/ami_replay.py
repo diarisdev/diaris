@@ -65,7 +65,9 @@ from src.config import FRAME_DURATION_MS
 from src.audio.vad import VADEngine
 from src.core.ai_worker import AIWorker
 from src.core.speaker_refinement import RefinementConfig, refine_speakers
+from src.core.embedding_trace import EmbeddingTraceWriter
 from tests.benchmarks._eval_worker import EvalAIWorker
+from tests.dataset_managers.ami import resolve_audio_path
 from src.pipeline import RecordingState, _update_recording_state, _flush_chunk_if_ready
 
 TARGET_RATE = 16000   # AMI ihm-mix zaten 16k mono
@@ -218,11 +220,15 @@ class _NullSink:
 # Tek toplantıyı işle
 # --------------------------------------------------------------------------- #
 def process_meeting(worker: AIWorker, vad: VADEngine, audio_path: str,
-                    language: str, progress_cb=None) -> tuple[list, float, float, float]:
+                    language: str, progress_cb=None,
+                    trace_writer=None) -> tuple[list, float, float, float]:
     """
     Returns: (global_results, audio_duration_sec, compute_time_sec, vad_speech_sec)
     global_results: [{speaker,start,end,text}, ...]  (mutlak zaman damgalı)
     vad_speech_sec: VAD'in 'konuşma' saydığı toplam süre (kapsama teşhisi için).
+
+    trace_writer: verilirse her chunk'ın konuşmacı karar izi kaydedilir
+        (EmbeddingTraceWriter). Tracker'ın teşhis modunu bu fonksiyon açar.
     """
     int16 = load_int16_mono(audio_path)
     frame_n = int(TARGET_RATE * FRAME_DURATION_MS / 1000)   # 480
@@ -230,6 +236,8 @@ def process_meeting(worker: AIWorker, vad: VADEngine, audio_path: str,
     audio_dur = len(int16) / TARGET_RATE
 
     worker.speaker_tracker.reset()          # önceki toplantı sızmasın
+    # Teşhis izi yalnızca istendiğinde: kapalıyken tracker hiç iz üretmez.
+    worker.speaker_tracker.debug_enabled = trace_writer is not None
     state = RecordingState()
     shim = _ListQueue()
     global_results: list = []
@@ -253,6 +261,16 @@ def process_meeting(worker: AIWorker, vad: VADEngine, audio_path: str,
             out["waveform_16k"], out["sample_rate"],
             out["chunk_duration_ms"], segs,
         )
+        if trace_writer is not None:
+            tracker = worker.speaker_tracker
+            trace_writer.add(tracker.last_trace,
+                             warming_up=tracker.is_warming_up,
+                             time_sec=offset)
+            trace_writer.set_warmup(tracker.last_warmup_trace)
+            # Aynı iz sonraki chunk'ta tekrar yazılmasın: warm-up sırasında
+            # map_speakers hiç çağrılmaz ve last_trace bayat kalır.
+            tracker.last_trace = None
+
         for r in diarized:
             global_results.append({
                 "speaker": r["speaker"],
@@ -328,6 +346,11 @@ def main() -> None:
     ap.add_argument("--verbose", action="store_true",
                     help="Chunk-başı worker loglarını göster. Varsayılan: bastırılır "
                          "(temiz ilerleme çubuğu + daha az stdout I/O).")
+    ap.add_argument("--trace-embeddings", action="store_true",
+                    help="Konuşmacı karar izlerini kaydet (toplantı başına bir .npz, "
+                         "çıktı dizininde traces/ altına). scripts/view_embedding_trace.py "
+                         "ile adım adım incelenir. Replay gerçek zamandan hızlı aktığı "
+                         "için canlı izlemek yerine kaydedip sonra gezmek doğru yoldur.")
     args = ap.parse_args()
 
     meetings_file = args.refs / "meetings.json"
@@ -382,27 +405,13 @@ def main() -> None:
     for i_m, m in enumerate(meetings, 1):
         mid = m["meeting_id"]
 
-        # Ses dosyasının konumunu çöz (datasets/ami altındaki yapıya göre)
-        audio_path_raw = m["audio_path"]
-        audio_path = Path(audio_path_raw)
-        if not audio_path.is_absolute():
-            # Farklı aday konumları kontrol et
-            candidate1 = args.refs.parent / audio_path
-            candidate2 = args.refs / audio_path
-            candidate3 = PROJECT_ROOT / "datasets" / "ami" / audio_path
-
-            if candidate1.exists():
-                audio_path = candidate1
-            elif candidate2.exists():
-                audio_path = candidate2
-            elif candidate3.exists():
-                audio_path = candidate3
-            else:
-                # Bulunamazsa varsayılan adayı ata (aşağıdaki exists kontrolünde yakalanıp atlanacak)
-                audio_path = candidate1
-
-        if not audio_path.exists():
-            print(f"[Warning] Ses dosyası bulunamadı, atlanıyor: {audio_path.resolve()}")
+        # Ses dosyasının konumunu çöz. meetings.json mutlak yolları indirme
+        # anında dondurur; proje yeniden adlandırılırsa (Audio-process -> diaris)
+        # bunlar ölür — resolver bayat yolları mevcut datasets köküne bağlar.
+        audio_path = resolve_audio_path(m["audio_path"], refs_dir=args.refs,
+                                        datasets_root=PROJECT_ROOT / "datasets")
+        if audio_path is None:
+            print(f"[Warning] Ses dosyası bulunamadı, atlanıyor: {m['audio_path']}")
             continue
 
         meeting_audio = float(m.get("duration_sec", 0.0)) or 1.0
@@ -419,17 +428,26 @@ def main() -> None:
                            f"geçen {_fmt_dur(el)} | ETA {_fmt_dur(eta)}   ")
             real_out.flush()
 
+        trace_writer = (EmbeddingTraceWriter(source=f"ami_replay:{mid}")
+                        if args.trace_embeddings else None)
+
         # Worker'ın chunk-başı spam'ini bastır (temiz çubuk + daha az stdout I/O);
         # --verbose ile açılır.
         if args.verbose:
             results, audio_dur, compute_time, vad_speech_sec = process_meeting(
-                worker, vad, str(audio_path), args.lang, progress_cb=_progress)
+                worker, vad, str(audio_path), args.lang, progress_cb=_progress,
+                trace_writer=trace_writer)
         else:
             with contextlib.redirect_stdout(_NullSink()):
                 results, audio_dur, compute_time, vad_speech_sec = process_meeting(
-                    worker, vad, str(audio_path), args.lang, progress_cb=_progress)
+                    worker, vad, str(audio_path), args.lang, progress_cb=_progress,
+                    trace_writer=trace_writer)
         real_out.write("\n")
         real_out.flush()
+
+        if trace_writer is not None and len(trace_writer):
+            trace_path = trace_writer.save(args.out / "traces" / f"{mid}.npz")
+            print(f"  [Iz] {len(trace_writer)} karar karesi -> {trace_path}")
 
         # Hayalet (çok kısa) konuşmacıları en yakın gerçek konuşmacıya birleştir.
         results = prune_tiny_speakers(results, args.prune_speaker_sec)

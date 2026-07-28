@@ -147,8 +147,39 @@ def _submit_partial_translation(executor, engine, on_transcription, text,
     executor.submit(job)
 
 
+def _sync_speaker_debug(ai_worker, debug_event, on_speaker_debug) -> bool:
+    """Teşhis bayrağını tracker'a yansıtır; iz üretilecek mi döner.
+
+    Diarization'dan ÖNCE çağrılır: tracker izi map_speakers sırasında kurar.
+    Pencere kapalıyken debug_enabled False kalır ve tracker hiç iz üretmez —
+    maliyet sıfır. Bayrak her chunk'ta okunduğu için pencere oturumun
+    ortasında açılıp kapanabilir.
+    """
+    tracker = getattr(ai_worker, "speaker_tracker", None)
+    if tracker is None:
+        return False
+    enabled = bool(debug_event and debug_event.is_set() and on_speaker_debug)
+    tracker.debug_enabled = enabled
+    return enabled
+
+
+def _emit_speaker_debug(ai_worker, on_speaker_debug) -> None:
+    """Diarization SONRASI karar izini yayınlar (teşhis penceresine)."""
+    tracker = getattr(ai_worker, "speaker_tracker", None)
+    if tracker is None or on_speaker_debug is None:
+        return
+    try:
+        on_speaker_debug({
+            "trace": tracker.last_trace,
+            "warmup": tracker.last_warmup_trace,
+            "warming_up": tracker.is_warming_up,
+        })
+    except Exception:
+        logger.exception("Speaker debug emit failed")
+
+
 def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None, translation_engine=None,
-                      session_transcript=None):
+                      session_transcript=None, on_speaker_debug=None, speaker_debug_event=None):
     """Process queued diarization tasks in the background."""
     while True:
         task = diarization_queue.get()
@@ -174,6 +205,10 @@ def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None, tran
             if diar_queue_ms is not None and diar_queue_ms > 5000:
                 logger.warning("Diarization queue lagging: %.0f ms wait", diar_queue_ms)
 
+            # Teşhis bayrağı diarization'dan ÖNCE ayarlanmalı: karar izi
+            # map_speakers sırasında kurulur.
+            debug_on = _sync_speaker_debug(ai_worker, speaker_debug_event, on_speaker_debug)
+
             # Run Pyannote diarization in background.
             # Sonuç: konuşmacıya göre bölünmüş, ÇEVRİLMEMİŞ segmentler.
             _t_diar = time.perf_counter()
@@ -181,6 +216,9 @@ def _diarization_loop(diarization_queue, ai_worker, on_speaker_update=None, tran
                 waveform_16k, sample_rate, chunk_duration_ms, transcribed_segments
             )
             diar_ms = (time.perf_counter() - _t_diar) * 1000.0
+
+            if debug_on:
+                _emit_speaker_debug(ai_worker, on_speaker_debug)
 
             # Çeviri: konuşmacı sınırından bölme SONRASI. TÜM segmentler TEK batch
             # çağrısında çevrilir — segment başına ayrı çağrı (özellikle yerel CPU
@@ -549,7 +587,7 @@ def _apply_session_refinement(session_transcript, on_transcript_refined=None) ->
     print()
 
 
-def run(stop_event=None, on_status_change=None, on_transcription=None, on_speaker_update=None, allow_interactive_device=False, device_index=None, get_lang_pair=None, on_transcript_refined=None):
+def run(stop_event=None, on_status_change=None, on_transcription=None, on_speaker_update=None, allow_interactive_device=False, device_index=None, get_lang_pair=None, on_transcript_refined=None, on_speaker_debug=None, speaker_debug_event=None):
     """
     Run the live recording and transcription loop.
 
@@ -565,6 +603,12 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
                       session-end speaker refinement changed any label. Only
                       changed lines are reported. Omit it (CLI) to have the
                       corrected lines printed instead.
+        on_speaker_debug: Called after each diarized chunk with the speaker
+                      tracker's decision trace (scores, thresholds, profiles) for
+                      the embedding view. Only fires while speaker_debug_event is
+                      set; the tracker produces no trace otherwise.
+        speaker_debug_event: threading.Event gating the above. Lets the UI turn
+                      diagnostics on and off mid-session.
     """
     p = pyaudio.PyAudio()
     stream = None
@@ -655,7 +699,7 @@ def run(stop_event=None, on_status_change=None, on_transcription=None, on_speake
         diarization_thread = threading.Thread(
             target=_diarization_loop,
             args=(diarization_queue, ai_worker, on_speaker_update, translation_engine,
-                  session_transcript),
+                  session_transcript, on_speaker_debug, speaker_debug_event),
             daemon=True,
         )
         diarization_thread.start()

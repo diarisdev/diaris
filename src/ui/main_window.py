@@ -7,6 +7,7 @@ import pyaudiowpatch as pyaudio
 
 from src.audio.device import list_loopback_devices
 from src.pipeline import run
+from src.ui.embedding_window import EmbeddingWindow
 from src.ui.subtitle_overlay import SubtitleOverlay
 from src.ui.tray import SystemTrayController
 from src.ui.resources import app_icon
@@ -17,6 +18,8 @@ class PipelineSignals(QtCore.QObject):
     speaker_updated = QtCore.Signal(dict)
     # Oturum-sonu konuşmacı düzeltmesi (yalnızca değişen satırlar).
     transcript_refined = QtCore.Signal(dict)
+    # Konuşmacı karar izi (embedding görünümü açıkken).
+    speaker_debug = QtCore.Signal(dict)
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -33,6 +36,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.signals.transcription_received.connect(self.safe_on_transcription)
         self.signals.speaker_updated.connect(self.safe_on_speaker_update)
         self.signals.transcript_refined.connect(self.safe_on_transcript_refined)
+        self.signals.speaker_debug.connect(self.safe_on_speaker_debug)
         
         # Eyaletler
         self.overlay_visible = True
@@ -43,6 +47,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.diarized_indices = set()
         self.pipeline_thread = None
         self.stop_event = threading.Event()
+        # Embedding görünümü: pencere açıkken set edilir; pipeline bu bayrağı her
+        # chunk'ta okur, böylece teşhis oturum ortasında açılıp kapanabilir.
+        self.embedding_window = None
+        self.speaker_debug_event = threading.Event()
         self.loopback_devices = []
         
         # Dil Eyaleti ve Çeviriler
@@ -86,6 +94,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "lang_pt": "Portekizce",
                 "analyzing": "Çözümleniyor...",
                 "live_prefix": "[Canlı] ",
+                "embedding_view": "Embedding görünümü",
                 "tray_refined_message": "Oturum sonu düzeltmesi: {n} segmentin konuşmacı etiketi güncellendi."
             },
             "en": {
@@ -127,6 +136,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "lang_pt": "Portuguese",
                 "analyzing": "Resolving...",
                 "live_prefix": "[Live] ",
+                "embedding_view": "Embedding view",
                 "tray_refined_message": "End-of-session refinement: speaker labels updated on {n} segment(s)."
             }
         }
@@ -384,9 +394,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.speaker_color_cb.setToolTip("Altyazı metnini konuşmacı rengine boyar")
         self.speaker_color_cb.toggled.connect(self.overlay.set_speaker_coloring)
         
+        # Teşhis: konuşmacı kararlarını görselleştiren pencere. Kapalıyken
+        # tracker hiç iz üretmez (maliyet sıfır) — bkz. pipeline._sync_speaker_debug.
+        self.embedding_btn = QtWidgets.QPushButton("Embedding görünümü", self.settings_group)
+        self.embedding_btn.setMinimumHeight(34)
+        self.embedding_btn.clicked.connect(self.toggle_embedding_window)
+
         self.settings_layout.addWidget(self.show_overlay_cb, 5, 0, 1, 3)
         self.settings_layout.addWidget(self.click_through_cb, 6, 0, 1, 3)
         self.settings_layout.addWidget(self.speaker_color_cb, 7, 0, 1, 3)
+        self.settings_layout.addWidget(self.embedding_btn, 8, 0, 1, 3)
         
         self.layout.addWidget(self.settings_group)
         
@@ -918,6 +935,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_overlay_cb.setText(trans["show_overlay"])
         self.click_through_cb.setText(trans["click_through"])
         self.speaker_color_cb.setText(trans["speaker_coloring"])
+        self.embedding_btn.setText(trans["embedding_view"])
         
         self.log_title.setText(trans["live_log"])
         
@@ -933,6 +951,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # Update overlay window language
         if hasattr(self, 'overlay'):
             self.overlay.set_language(lang)
+
+        if getattr(self, "embedding_window", None) is not None:
+            self.embedding_window.set_language(lang)
 
     def safe_on_status_change(self, text):
         translated_text = self.translate_status(text, self.ui_lang)
@@ -1040,6 +1061,28 @@ class MainWindow(QtWidgets.QMainWindow):
             4000,
         )
 
+    def safe_on_speaker_debug(self, event):
+        """Konuşmacı karar izi — embedding görünümü açıkken her chunk'ta gelir."""
+        if self.embedding_window is not None:
+            self.embedding_window.update_state(event)
+
+    def toggle_embedding_window(self):
+        """Teşhis penceresini açar/kapatır ve pipeline'daki iz üretimini yönetir."""
+        if self.embedding_window is not None:
+            self.embedding_window.close()
+            return
+
+        self.embedding_window = EmbeddingWindow()
+        self.embedding_window.set_language(self.ui_lang)
+        self.embedding_window.closed.connect(self.on_embedding_window_closed)
+        self.embedding_window.show()
+        # İz üretimi yalnızca pencere açıkken.
+        self.speaker_debug_event.set()
+
+    def on_embedding_window_closed(self):
+        self.speaker_debug_event.clear()
+        self.embedding_window = None
+
     # ------------------------------------------------------------------ #
     #  Kayıt Kontrolleri                                                  #
     # ------------------------------------------------------------------ #
@@ -1071,6 +1114,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.signals.speaker_updated.emit(event)
         def refined_cb(event):
             self.signals.transcript_refined.emit(event)
+        def debug_cb(event):
+            self.signals.speaker_debug.emit(event)
 
         def get_lang_pair():
             source_lang = self.source_lang_combo.currentData() or "en"
@@ -1085,6 +1130,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "on_transcription": trans_cb,
                 "on_speaker_update": speaker_cb,
                 "on_transcript_refined": refined_cb,
+                "on_speaker_debug": debug_cb,
+                "speaker_debug_event": self.speaker_debug_event,
                 "device_index": device_idx,
                 "get_lang_pair": get_lang_pair,
             },
@@ -1194,6 +1241,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def finalize_close_app(self):
         self.overlay.close()
+        if self.embedding_window is not None:
+            self.embedding_window.close()
         self.tray.tray.hide()
         QtWidgets.QApplication.quit()
         sys.exit(0)

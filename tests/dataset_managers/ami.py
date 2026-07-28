@@ -10,8 +10,62 @@ import json
 import os
 import shutil
 from collections import defaultdict
+from pathlib import Path
 
 from .base import DATASETS_ROOT, _download_with_progress, sf
+
+
+def resolve_audio_path(raw_path, refs_dir=None, datasets_root=None):
+    """meetings.json'daki ses yolunu MEVCUT diskte çözer.
+
+    meetings.json, lhotse'un verdiği MUTLAK yolları indirme anında dondurur.
+    Proje dizini taşınır ya da yeniden adlandırılırsa (Audio-process -> diaris)
+    bu yollar ölü kalır; runner her toplantıyı "ses bulunamadı" diye atlar ve
+    koşu sessizce hiçbir şey yapmaz. Referansları yeniden üretmek GB'larca
+    indirme demek olduğundan yolu OKUMA anında çözüyoruz.
+
+    Sıra:
+        1. Yol olduğu gibi var mı (normal durum).
+        2. Göreli yol adayları (refs dizini / datasets kökü).
+        3. Bayat mutlak yolu yeniden köklendir: '...\\datasets\\ami\\X' kuyruğunu
+           mevcut datasets kökünün altına bağla.
+        4. Son çare: dosya adını datasets kökü altında ara.
+
+    Returns:
+        Path (bulunduysa) veya None.
+    """
+    if not raw_path:
+        return None
+    datasets_root = Path(datasets_root or DATASETS_ROOT)
+    candidate = Path(raw_path)
+
+    if candidate.exists():
+        return candidate
+
+    if not candidate.is_absolute():
+        relatives = [datasets_root / "ami" / candidate]
+        if refs_dir is not None:
+            relatives = [Path(refs_dir).parent / candidate,
+                         Path(refs_dir) / candidate] + relatives
+        for option in relatives:
+            if option.exists():
+                return option
+
+    # Bayat mutlak yol: 'datasets' bileşeninden sonrasını mevcut köke bağla.
+    parts = candidate.parts
+    for index, part in enumerate(parts):
+        if part.lower() == "datasets":
+            rebased = datasets_root.parent / Path(*parts[index:])
+            if rebased.exists():
+                return rebased
+            break
+
+    # Dosya adıyla ara (yavaş ama kesin; yalnızca son çare).
+    ami_root = datasets_root / "ami"
+    if ami_root.is_dir():
+        for found in ami_root.rglob(candidate.name):
+            return found
+    return None
 
 
 class AmiDiarizationManager:
