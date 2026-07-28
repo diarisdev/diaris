@@ -141,6 +141,9 @@ class SubtitleOverlay(QtWidgets.QWidget):
         # Kullanıcı en alttayken yeni satır geldikçe otomatik kayar; yukarı
         # kaydırdıysa konumu korunur ve "en alta dön" düğmesi çıkar.
         self._stick_to_bottom = True
+        # {kanonik_etiket: kullanıcı_ismi} — ana panelden gelir. Yalnızca
+        # gösterimi etkiler; overlay'in tasarımı ve mantığı değişmez.
+        self.speaker_names = {}
 
         # Arayüz kurulumu
         self.setup_ui()
@@ -285,6 +288,16 @@ class SubtitleOverlay(QtWidgets.QWidget):
         # Tıklama-geçirgen modda düğme tıklanamaz; göstermek yanıltıcı olur.
         self._update_scroll_button()
 
+    def set_speaker_names(self, names):
+        """Kullanıcının verdiği konuşmacı isimlerini uygular.
+
+        Tasarıma dokunmaz — yalnızca konuşmacı sütununda gösterilen metin
+        değişir. Renkler kanonik etiketten geldiği için aynı kalır.
+        """
+        self.speaker_names = dict(names or {})
+        self._last_finalized = None   # yeniden ayrıştırmayı zorla
+        self.render_subtitles()
+
     def set_speaker_coloring(self, enabled):
         """Konuşmacı renginin tüm altyazı metnini boyayıp boyamayacağını ayarlar."""
         self.speaker_coloring = enabled
@@ -347,8 +360,11 @@ class SubtitleOverlay(QtWidgets.QWidget):
         for speaker_tag, content in reversed(parsed_tail):
             is_continuation = bool(speaker_tag) and speaker_tag == prev_tag
             prev_tag = speaker_tag
+            # Kullanıcı isim verdiyse onu göster; renk kanonik etiketten gelir.
+            shown = self.speaker_names.get(speaker_tag) or (
+                display_name(speaker_tag) if speaker_tag else "")
             segments.append({
-                "speaker": "" if is_continuation else (display_name(speaker_tag) if speaker_tag else ""),
+                "speaker": "" if is_continuation else shown,
                 "text": content,
                 "color": color_for_speaker(speaker_tag),
                 "continuation": is_continuation,

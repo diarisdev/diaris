@@ -7,7 +7,9 @@ import pyaudiowpatch as pyaudio
 
 from src.audio.device import list_loopback_devices
 from src.pipeline import run
+from src.core.formatting import parse_result_line
 from src.ui.embedding_window import EmbeddingWindow
+from src.ui.speaker_bar import SpeakerBar, is_nameable
 from src.ui.subtitle_overlay import SubtitleOverlay
 from src.ui.tray import SystemTrayController
 from src.ui.resources import app_icon
@@ -45,6 +47,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # Diarization güncellemesi almış segment index'leri: geç gelen
         # 'provisional' (asenkron çeviri) güncellemeleri bunların üstüne yazamaz.
         self.diarized_indices = set()
+        # {kanonik_etiket: kullanici_ismi} -- YALNIZCA gosterim katmani.
+        # Pipeline, tracker ve olcumler kanonik SPEAKER_XX ile calismaya devam
+        # eder. Oturuma ozeldir: yeni kayitta sifirlanir, cunku ikinci
+        # oturumdaki SPEAKER_00 ayni kisi degildir.
+        self.speaker_names = {}
         self.pipeline_thread = None
         self.stop_event = threading.Event()
         # Embedding görünümü: pencere açıkken set edilir; pipeline bu bayrağı her
@@ -374,11 +381,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_title = QtWidgets.QLabel("Canlı transkripsiyon günlüğü", self.log_group)
         self.log_title.setObjectName("GroupTitle")
 
+        # Konusmaci seridi: oturum verisi, gunluk ile ayni panelde durmali.
+        # Konusmaci yokken (kayit oncesi / kalibrasyon sirasinda) tamamen gizli.
+        self.speaker_bar = SpeakerBar(self.log_group)
+        self.speaker_bar.renamed.connect(self.on_speaker_renamed)
+        self.speaker_bar.hide()
+
         self.log_text = QtWidgets.QTextEdit(self.log_group)
         self.log_text.setReadOnly(True)
         self.log_text.setFont(QtGui.QFont("Consolas", 11))
 
         self.log_layout.addWidget(self.log_title)
+        self.log_layout.addWidget(self.speaker_bar)
         self.log_layout.addWidget(self.log_text)
         return self.log_group
 
@@ -530,6 +544,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self.DARK_STYLESHEET = """
             QMainWindow {
                 background-color: #0f1115;
+            }
+            /* --- Konusmaci cipleri --- */
+            QWidget#SpeakerBar {
+                background: transparent;
+            }
+            QFrame#SpeakerChip {
+                background-color: #1d222b;
+                border: 1px solid #2c3340;
+                border-radius: 14px;
+            }
+            QFrame#SpeakerChip:hover {
+                background-color: #232935;
+                border-color: #3a4354;
+            }
+            QLabel#SpeakerChipName {
+                color: #e8edf3;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QLabel#SpeakerChipDuration {
+                color: #7f8b99;
+                font-size: 12px;
+            }
+            QLineEdit#SpeakerChipEdit {
+                background-color: #10131a;
+                border: 1px solid #2dd4bf;
+                border-radius: 5px;
+                color: #f8fafc;
+                font-size: 13px;
+                font-weight: 600;
+                padding: 1px 6px;
             }
             /* --- Sekmeler: cercevesiz, altcizgili (modern) --- */
             QTabWidget#MainTabs::pane {
@@ -747,6 +792,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self.LIGHT_STYLESHEET = """
             QMainWindow {
                 background-color: #f6f8fb;
+            }
+            /* --- Konusmaci cipleri --- */
+            QWidget#SpeakerBar {
+                background: transparent;
+            }
+            QFrame#SpeakerChip {
+                background-color: #f1f5f9;
+                border: 1px solid #dde5ee;
+                border-radius: 14px;
+            }
+            QFrame#SpeakerChip:hover {
+                background-color: #e8eef6;
+                border-color: #c7d3e2;
+            }
+            QLabel#SpeakerChipName {
+                color: #172033;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QLabel#SpeakerChipDuration {
+                color: #7c8798;
+                font-size: 12px;
+            }
+            QLineEdit#SpeakerChipEdit {
+                background-color: #ffffff;
+                border: 1px solid #0d9488;
+                border-radius: 5px;
+                color: #0f172a;
+                font-size: 13px;
+                font-weight: 600;
+                padding: 1px 6px;
             }
             /* --- Sekmeler: cercevesiz, altcizgili (modern) --- */
             QTabWidget#MainTabs::pane {
@@ -1155,12 +1231,17 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         analyzing = self.TRANSLATIONS[self.ui_lang]["analyzing"]
 
+        visible = self.finalized_segments[-self.MAX_LOG_SEGMENTS:]
+
         lines = []
-        for seg in self.finalized_segments[-self.MAX_LOG_SEGMENTS:]:
+        for seg in visible:
             if seg:
-                lines.append(seg.replace("Çözümleniyor...", analyzing) + "\n")
+                lines.append(self._apply_speaker_names(
+                    seg.replace("Çözümleniyor...", analyzing)) + "\n")
         if partial:
             lines.append(f"{self.TRANSLATIONS[self.ui_lang]['live_prefix']}{partial}")
+
+        self._refresh_speaker_bar(visible)
 
         self.log_text.setPlainText("\n".join(lines))
         self.log_text.moveCursor(QtGui.QTextCursor.MoveOperation.End)
@@ -1168,11 +1249,56 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Altyazı overlay'i zaten yalnızca son satırları gösteriyor; ona da
         # sınırlı liste yeterli (update_subtitles sondan doğru ayrıştırır).
+        #
+        # DİKKAT: overlay'e KANONİK etiketli metin gider, isim uygulanmaz.
+        # Overlay rengi etiketten hesaplıyor; "[Ahmet]" gönderirsek
+        # color_for_speaker SPEAKER_XX kalıbını göremeyip hash'e düşer ve
+        # konuşmacının rengi isim verilince DEĞİŞİR — panel ile overlay farklı
+        # renk gösterir. İsim eşlemesi overlay'in kendi katmanında yapılır
+        # (set_speaker_names): gösterilen metin değişir, renk kanonik etiketten
+        # geldiği için sabit kalır.
         finalized_translated = [
             seg.replace("Çözümleniyor...", analyzing) if seg else ""
-            for seg in self.finalized_segments[-self.MAX_LOG_SEGMENTS:]
+            for seg in visible
         ]
         self.overlay.update_subtitles(finalized_translated, partial)
+
+    def _apply_speaker_names(self, text: str) -> str:
+        """Kanonik etiketleri kullanici isimleriyle degistirir (yalnizca gosterim)."""
+        if not self.speaker_names or not text:
+            return text
+        out = []
+        for line in text.split("\n"):
+            parsed = parse_result_line(line)
+            name = self.speaker_names.get(parsed["speaker"]) if parsed else None
+            if name:
+                line = line.replace(f"[{parsed['speaker']}]", f"[{name}]", 1)
+            out.append(line)
+        return "\n".join(out)
+
+    def _refresh_speaker_bar(self, segments) -> None:
+        """Gorunen gunlukten konusmaci sureleri cikarip seridi tazeler."""
+        durations = {}
+        for segment in segments:
+            if not segment:
+                continue
+            for line in segment.split("\n"):
+                parsed = parse_result_line(line)
+                if not parsed or not is_nameable(parsed["speaker"]):
+                    continue
+                span = max(0.0, parsed["end"] - parsed["start"])
+                durations[parsed["speaker"]] = durations.get(parsed["speaker"], 0.0) + span
+        self.speaker_bar.update_speakers(durations, self.speaker_names)
+
+    def on_speaker_renamed(self, label: str, name: str) -> None:
+        """Kullanici bir konusmaciya isim verdi (ya da geri aldi)."""
+        if name:
+            self.speaker_names[label] = name
+        else:
+            self.speaker_names.pop(label, None)
+        # Overlay de ayni ismi gostersin -- tasarimi degismez, yalnizca metin.
+        self.overlay.set_speaker_names(self.speaker_names)
+        self._refresh_views()
 
     def safe_on_transcription(self, event):
         if not isinstance(event, dict):
@@ -1270,6 +1396,10 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.finalized_segments = []
         self.diarized_indices = set()
+        # Isimler oturuma ozel: yeni kayitta SPEAKER_00 ayni kisi degil.
+        self.speaker_names = {}
+        self.overlay.set_speaker_names({})
+        self.speaker_bar.update_speakers({}, {})
         self.log_text.clear()
         self.overlay.update_subtitles([], "")
         
