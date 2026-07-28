@@ -108,13 +108,19 @@ class EvalAIWorker(AIWorker):
     """
 
     def __init__(self, rate=None, channels=None, embedding_threshold=None,
-                 cohort_norm=None, posterior=None):
+                 cohort_norm=None, posterior=None, live_tracker=False):
         super().__init__(rate=rate, channels=channels)
         # Tracker'ı eval varyantıyla değiştir. None geçilen parametrelerde
         # config/.env varsayılanı kullanılır; verilirse eval'e özel (canlı etkilenmez).
-        self.speaker_tracker = EvalSpeakerTracker(threshold=embedding_threshold,
-                                                  cohort_norm=cohort_norm,
-                                                  posterior=posterior)
+        #
+        # live_tracker=True ise ÜRETİM SpeakerTracker'ı kullanılır. Eval varyantı
+        # canlı yoldan bilerek ayrılmıştı ve zamanla aralarında davranış farkı
+        # birikti — sonuç: bugüne kadar ölçülen her şey eval yoluydu, canlı yol
+        # körlemesine kaldı. Bu bayrak canlı davranışı AMI'de ölçülebilir kılar.
+        tracker_cls = SpeakerTracker if live_tracker else EvalSpeakerTracker
+        self.speaker_tracker = tracker_cls(threshold=embedding_threshold,
+                                           cohort_norm=cohort_norm,
+                                           posterior=posterior)
 
     def _smooth_speaker_labels(self, results):
         """Agresif: < 1s segmenti baskın komşunun konuşmacısına devret.

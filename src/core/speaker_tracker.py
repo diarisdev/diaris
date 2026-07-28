@@ -132,8 +132,14 @@ class SpeakerTracker:
 
         # Warm-up state
         self._warmup_buffer = []  # list of embedding tensors
+        # Her warm-up embedding'inin ÇAĞIRANA ait kaynağı (aynı sırada).
+        # Kalibrasyon bitince "[Calibrating]" segmentlerini geriye dönük
+        # etiketlemek için kullanılır.
+        self._warmup_sources = []
         self._warmup_audio_ms = 0  # toplam işlenen ses süresi
         self._warmup_complete = False
+        # {kaynak_anahtari: konusmaci_etiketi} — _finalize_warmup doldurur.
+        self.warmup_assignments = {}
 
         # Yeni konuşmacı aday tamponu
         # Her aday: {"embeddings": [tensor, ...], "created_at": int}
@@ -157,6 +163,8 @@ class SpeakerTracker:
         self._speech_seconds = {}
         self._next_id = 0
         self._warmup_buffer = []
+        self._warmup_sources = []
+        self.warmup_assignments = {}
         self._warmup_audio_ms = 0
         self._warmup_complete = False
         self._candidates = []
@@ -378,7 +386,7 @@ class SpeakerTracker:
     # ------------------------------------------------------------------ #
     # Warm-up
     # ------------------------------------------------------------------ #
-    def add_warmup_chunk(self, embeddings, chunk_duration_ms):
+    def add_warmup_chunk(self, embeddings, chunk_duration_ms, sources=None):
         """Warm-up fazında BİR CHUNK'ın embedding'lerini toplar.
 
         API bilerek chunk seviyesindedir. Önceki embedding-seviyesi sürüm
@@ -397,6 +405,11 @@ class SpeakerTracker:
         Args:
             embeddings: bu chunk'tan çıkan embedding tensörleri (iterable).
             chunk_duration_ms: chunk'ın süresi — TOPLAMA BİR KEZ eklenir.
+            sources: embedding'lerle AYNI SIRADA, çağırana ait opak anahtarlar
+                (örn. (segment_index, local_label)). Verilirse kalibrasyon
+                bitince `warmup_assignments` bu anahtarları oluşan konuşmacı
+                etiketlerine eşler — böylece warm-up sırasında "[Calibrating]"
+                diye geçilen segmentler GERİYE DÖNÜK olarak etiketlenebilir.
 
         Returns:
             bool: True ise warm-up bu çağrıda bitti (baseline hazır).
@@ -405,8 +418,10 @@ class SpeakerTracker:
         if not collected:
             return False
 
-        for embedding in collected:
+        keys = list(sources) if sources is not None else []
+        for index, embedding in enumerate(collected):
             self._warmup_buffer.append(embedding.cpu())
+            self._warmup_sources.append(keys[index] if index < len(keys) else None)
         self._warmup_audio_ms += chunk_duration_ms
 
         # Kapı 1: yeterli ses.
@@ -420,11 +435,59 @@ class SpeakerTracker:
         self._finalize_warmup()
         return True
 
+    # --- Warm-up gürültü filtresi -------------------------------------- #
+    # Tek üyeli küme "gürültü" sayılmadan önce, konuşmacı başına BİRDEN ÇOK
+    # gözlem beklenebilecek kadar veri olmalı. 4-6 konuşmacılı bir toplantıda
+    # 12 embedding ≈ kişi başına 2-3 gözlem demektir; ancak o zaman yalnız
+    # kalmış bir embedding gerçekten sıra dışıdır.
+    WARMUP_SINGLETON_FILTER_MIN_EMBEDDINGS = 12
+
+    def _filter_noise_clusters(self, clusters: dict, n: int) -> dict:
+        """Gürültü kümelerini eler — ama YALNIZCA elemenin anlamlı olduğu yerde.
+
+        ÖLÇÜLDÜ (AMI, kaydedilmiş warm-up izleri):
+
+            IS1009a  6 embedding -> kümeler [3,1,1,1]   gerçek 4 konuşmacı
+            ES2004a  8 embedding -> [2,2,1,1,1,1]       gerçek 4 konuşmacı
+            TS3003a  7 embedding -> [2,2,1,1,1]         gerçek 4 konuşmacı
+
+        Küme-içi benzerlik 0.62-0.74, küme-arası 0.16-0.33 — yani ayrım TEMİZ,
+        kümeleme doğru çalışıyor. Tek üyeli kümeler gürültü DEĞİL: warm-up
+        penceresinde yalnızca bir kez konuşmuş GERÇEK insanlar. Onları elemek
+        insanı elemek olur; eski kural (`n >= 6` ise tek üyelileri at) bu üç
+        toplantıyı 4 konuşmacıdan 1-2'ye çöktürüyordu.
+
+        İki koşul birden aranır:
+          1. Yeterli veri — kişi başına birden çok gözlem beklenebilmeli.
+          2. Tek üyeliler AZINLIK olmalı. Kümelerin çoğu tek üyeliyse bu,
+             gürültü değil yetersiz örnekleme demektir.
+
+        Ayrıca eleme gereksizdir: `_register_speaker` tek gözlemli profile zaten
+        düşük olgunluk kredisi verir (gözlem başına 1 sn), yani o profil yeni
+        sesi sahiplenmek için daha güçlü kanıt ister. "Az kanıtlı profile daha
+        az güven" mekanizması zaten var.
+        """
+        singletons = [key for key, members in clusters.items() if len(members) < 2]
+        if not singletons:
+            return dict(clusters)
+
+        enough_data = n >= self.WARMUP_SINGLETON_FILTER_MIN_EMBEDDINGS
+        singletons_are_minority = len(singletons) * 2 <= len(clusters)
+        if not (enough_data and singletons_are_minority):
+            return dict(clusters)
+
+        valid = {key: members for key, members in clusters.items() if len(members) >= 2}
+        if not valid:  # her ihtimale karşı: hepsi elendiyse en büyüğü kurtar
+            largest = max(clusters.items(), key=lambda item: len(item[1]))
+            return {largest[0]: largest[1]}
+        return valid
+
     def _finalize_warmup(self):
         """
         İki-aşamalı warm-up clustering:
         1. Pairwise similarity matrix ile agglomerative clustering
-        2. Küçük kümeleri (< 2 embedding) filtrele (gürültü)
+        2. Gürültü kümelerini filtrele (yalnızca yeterli veri varken — bkz.
+           _filter_noise_clusters)
         """
         if not self._warmup_buffer:
             self._warmup_complete = True
@@ -437,8 +500,10 @@ class SpeakerTracker:
             # Tek embedding varsa direkt konuşmacı oluştur
             label = self._register_speaker([self._warmup_buffer[0]])
             self._record_warmup_trace(None, {label: [0]}, n)
+            self._assign_warmup_sources({label: [0]})
             self._warmup_complete = True
             self._warmup_buffer = []
+            self._warmup_sources = []
             print(f"[Warm-up Complete] 1 speaker detected: {label}")
             print(f"   ({self._warmup_audio_ms / 1000:.1f}s audio)\n")
             return
@@ -484,14 +549,8 @@ class SpeakerTracker:
             clusters[best_i].extend(clusters[best_j])
             del clusters[best_j]
 
-        # Küçük kümeleri filtrele (gürültü olma ihtimali yüksek)
-        min_cluster_size = 2 if n >= 6 else 1
-        valid_clusters = {k: v for k, v in clusters.items() if len(v) >= min_cluster_size}
-
-        # Eğer filtreleme sonrası hiçbir küme kalmadıysa, en büyük kümeyi al
-        if not valid_clusters:
-            largest = max(clusters.items(), key=lambda x: len(x[1]))
-            valid_clusters = {largest[0]: largest[1]}
+        # Tek üyeli kümeleri "gürültü" diye eleme kararı.
+        valid_clusters = self._filter_noise_clusters(clusters, n)
 
         # Her kümeden konuşmacı oluştur (rezervuar = küme üyeleri)
         cluster_labels = {}
@@ -502,6 +561,9 @@ class SpeakerTracker:
         # Kalibrasyonun ne kadar sağlam olduğunu görünür kıl: kaç embedding'le
         # bitti, hangi kümeler oluştu, çiftler arası benzerlik neydi.
         self._record_warmup_trace(sim_matrix, cluster_labels, n)
+        # Geriye dönük etiketleme haritası: hangi warm-up embedding'i hangi
+        # konuşmacıya gitti. Elenen kümelerin kaynakları haritaya GİRMEZ.
+        self._assign_warmup_sources(cluster_labels)
 
         self._warmup_complete = True
 

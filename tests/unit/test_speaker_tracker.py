@@ -143,6 +143,71 @@ def test_warmup_trace_is_recorded_even_without_debug():
 
 
 # --------------------------------------------------------------------------- #
+# Warm-up gürültü filtresi
+#
+# REGRESYON: eski kural (`n >= 6` ise tek üyeli kümeleri at) gerçek AMI
+# verisinde 4 konuşmacıyı 1-2'ye çöktürüyordu. Tek üyeli kümeler gürültü değil,
+# warm-up penceresinde bir kez konuşmuş insanlardı.
+# --------------------------------------------------------------------------- #
+def _filter(clusters, n):
+    from src.core.speaker_tracker import SpeakerTracker
+    return SpeakerTracker(threshold=0.70, warmup_ms=1000)._filter_noise_clusters(
+        clusters, n)
+
+
+def test_singletons_survive_when_data_is_thin():
+    """ÖLÇÜLEN SENARYO: IS1009a, 6 embedding, kümeler [3,1,1,1], gerçek 4 kişi."""
+    clusters = {0: [0, 1, 2], 1: [3], 2: [4], 3: [5]}
+    assert len(_filter(clusters, n=6)) == 4, "gerçek konuşmacılar elenmemeliydi"
+
+
+def test_singletons_survive_when_they_are_the_majority():
+    """Kümelerin çoğu tek üyeliyse bu gürültü değil, yetersiz örneklemedir."""
+    clusters = {0: list(range(6)), 1: [6], 2: [7], 3: [8], 4: [9], 5: [10], 6: [11]}
+    assert len(_filter(clusters, n=12)) == 7
+
+
+def test_lone_singleton_is_dropped_when_evidence_is_plentiful():
+    """Herkes birkaç kez konuşmuşken YALNIZ kalan bir embedding gerçekten sıra dışı."""
+    clusters = {0: [0, 1, 2], 1: [3, 4, 5], 2: [6, 7, 8], 3: [9, 10, 11], 4: [12]}
+    filtered = _filter(clusters, n=13)
+    assert len(filtered) == 4
+    assert 4 not in filtered
+
+
+def test_clusters_without_singletons_pass_through():
+    clusters = {0: [0, 1], 1: [2, 3]}
+    assert _filter(clusters, n=4) == clusters
+
+
+def test_filter_never_returns_nothing():
+    """Her şey elenirse en büyük küme kurtarılmalı — konuşmacısız kalmayalım."""
+    clusters = {0: [0], 1: [1]}
+    assert len(_filter(clusters, n=2)) >= 1
+
+
+def test_warmup_end_to_end_keeps_under_sampled_speakers():
+    """Gerçek akış: 4 farklı ses, biri iki kez duyulmuş → 4 profil olmalı."""
+    torch = pytest.importorskip("torch")
+    tracker = _tracker(warmup_ms=1000)
+
+    voices = [
+        torch.tensor([1.0, 0.0, 0.0, 0.0]),
+        torch.tensor([1.0, 0.05, 0.0, 0.0]),   # aynı kişi, ikinci gözlem
+        torch.tensor([0.0, 1.0, 0.0, 0.0]),
+        torch.tensor([0.0, 0.0, 1.0, 0.0]),
+        torch.tensor([0.0, 0.0, 0.0, 1.0]),
+        torch.tensor([0.0, 0.0, 0.7, 0.7]),    # kimseye tam benzemiyor
+    ]
+    tracker.add_warmup_chunk(voices, 2000)
+
+    assert not tracker.is_warming_up
+    # Eski filtre burada [2,1,1,1,1] kümelerinden yalnız [2]'yi bırakıp
+    # 1 konuşmacıya çökertirdi.
+    assert len(tracker.known_speakers) >= 4
+
+
+# --------------------------------------------------------------------------- #
 # Karar izi (embedding görünümü)
 # --------------------------------------------------------------------------- #
 def _active_tracker(torch):

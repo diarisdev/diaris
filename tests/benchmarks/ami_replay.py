@@ -352,6 +352,12 @@ def main() -> None:
     ap.add_argument("--posterior-calibration", type=Path,
                     default=PROJECT_ROOT / "calibration" / "speaker_posterior.json",
                     help="Posterior kalibrasyon dosyası.")
+    ap.add_argument("--live-tracker", action="store_true",
+                    help="Eval varyantı yerine ÜRETİM SpeakerTracker'ını kullan. "
+                         "Eval tracker warm-up gürültü filtresini kapatıyor; canlı "
+                         "uygulama kapatmıyor. Bu bayrak olmadan canlı davranış "
+                         "AMI'de hiç ölçülmez. Canlı benzeri koşu için ayrıca "
+                         "--embedding-threshold 0.66 verin (.env varsayılanı).")
     ap.add_argument("--new-speaker", type=float, default=None,
                     help="Posterior: yeni konuşmacı açma kapısı (ham 'hiçbiri değil' "
                          "kütlesi bu değeri aşmalı). Yüksek = daha az konuşmacı. "
@@ -422,11 +428,13 @@ def main() -> None:
     print(f"[Replay] Modeller yükleniyor... (EvalAIWorker, "
           f"embedding_threshold={args.embedding_threshold or 'config'}, "
           f"cohort_norm={'config' if args.cohort_norm is None else args.cohort_norm}, "
-          f"posterior={'acik' if posterior else 'kapali'})")
+          f"posterior={'acik' if posterior else 'kapali'}, "
+          f"tracker={'CANLI' if args.live_tracker else 'eval'})")
     worker = EvalAIWorker(rate=TARGET_RATE, channels=TARGET_CH,
                           embedding_threshold=args.embedding_threshold,
                           cohort_norm=args.cohort_norm,
-                          posterior=posterior)
+                          posterior=posterior,
+                          live_tracker=args.live_tracker)
     if not worker.load_models():
         raise SystemExit("AIWorker modelleri yüklenemedi.")
     # Eval'e özel VAD hassasiyeti (canlı .env'i etkilemez). AMI mix-headset'te
